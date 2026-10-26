@@ -1,0 +1,8 @@
+# Test-only compose override for tests/large_file_tests.py: caps tesp-api's memory well below the 1 GiB test file, so
+# a transfer that buffered the file in tesp-api would get it OOM-killed. Swap is off for the same reason.
+#
+#   docker compose -f docker-compose.yaml -f tests/compose.mem-limit.yaml --profile pulsar up -d --build
+services:
+  tesp-api:
+    mem_limit: 512m
+    memswap_limit: 512m

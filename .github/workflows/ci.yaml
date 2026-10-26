@@ -63,7 +63,8 @@ jobs:
           python-version: "3.11"
 
       - name: start compose stack
-        run: docker compose --profile pulsar up -d --build
+        # tests/compose.mem-limit.yaml caps tesp-api's memory for tests/large_file_tests.py.
+        run: docker compose -f docker-compose.yaml -f tests/compose.mem-limit.yaml --profile pulsar up -d --build
 
       - name: install test dependencies
         run: pip install . "pytest>=7.1,<8" flask
@@ -109,6 +110,13 @@ jobs:
 
       - name: run smoke tests
         run: pytest tests/smoke_tests.py
+
+      - name: run large-file tests
+        # 1 GiB through S3 and HTTP inputs and outputs, with tesp-api capped at 512 MiB (issue #6).
+        run: |
+          df -h / /opt/pysetup/files/staging
+          pytest -s tests/large_file_tests.py
+          df -h /
 
       - name: dump logs on failure
         if: failure() || cancelled()
