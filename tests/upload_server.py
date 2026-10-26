@@ -8,6 +8,9 @@ UPLOAD_ROOT = os.path.join(HOME_DIR, "uploaded_data")
 SERVE_ROOT = HOME_DIR
 
 app = Flask(__name__)
+# Serve /dir and /dir/file without redirecting to a trailing-slash URL: Werkzeug would otherwise answer every GET
+# without a trailing slash with a 308 to the /<path:subpath>/ rule, and stage-in curl does not follow redirects.
+app.url_map.strict_slashes = False
 
 # Handle file upload
 @app.route('/upload', methods=['POST'])
