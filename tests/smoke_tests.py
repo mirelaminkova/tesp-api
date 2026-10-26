@@ -256,7 +256,7 @@ def cleanup_uploaded_data():
 
 # S3 inputs (issue #3). MinIO runs in the compose "pulsar" profile; tesp-api gets the endpoint and
 # credentials through TESP_API_S3__* in docker-compose.yaml. The URLs in the task carry no credentials.
-S3_TEST_ENDPOINT = "http://localhost:9000"
+S3_TEST_ENDPOINT = "http://172.17.0.1:9000"  # MinIO listens on the docker bridge only
 S3_TEST_ACCESS_KEY = "tesp-test"
 S3_TEST_SECRET_KEY = "tesp-test-secret"  # local MinIO test credentials, same as in docker-compose.yaml
 S3_TEST_BUCKET = "tesp-test"

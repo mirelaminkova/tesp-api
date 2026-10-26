@@ -3,10 +3,12 @@ import asyncio
 from pydantic.error_wrappers import ValidationError
 from starlette.responses import RedirectResponse
 from fastapi import FastAPI, APIRouter, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 import tesp_api.service.event_actions
 from tesp_api.api.api import api_router
-from tesp_api.api.error import api_handle_error
+from tesp_api.api.error import api_handle_error, redact_validation_errors
 from tesp_api.config.log_config import logg_configure
 from tesp_api.config.properties import properties
 from tesp_api.repository.task_repository import task_repository
@@ -32,6 +34,10 @@ async def startup_event():
 @app.exception_handler(ValidationError)
 async def validation_error_handler(request: Request, exception: ValidationError):
     return api_handle_error(exception)
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exception: RequestValidationError):
+    return JSONResponse(status_code=422, content={'detail': redact_validation_errors(exception.errors())})
 
 app.include_router(root_router)
 app.include_router(api_router)

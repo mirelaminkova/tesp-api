@@ -65,7 +65,7 @@ services:
       - MINIO_ROOT_PASSWORD=tesp-test-secret  # local test credentials only
       - MINIO_DEFAULT_BUCKETS=tesp-test
     ports:
-      - "9000:9000"
+      - "172.17.0.1:9000:9000"  # docker bridge only: reachable by staging containers, not from the network
 
 # Some cloud providers may require a lower MTU!
 networks:

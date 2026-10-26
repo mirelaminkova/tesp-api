@@ -56,7 +56,8 @@ def load_s3_config(props=None) -> S3Config:
 
     def setting(name):
         value = s3.get(name)
-        return None if value in (None, '') else value
+        # Dynaconf parses environment values, e.g. a secret key "123456" would become an int.
+        return None if value in (None, '') else str(value)
 
     return S3Config(
         endpoint_url=setting('endpoint_url'),

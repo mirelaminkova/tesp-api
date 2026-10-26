@@ -242,8 +242,8 @@ class RegisteredTesTask(TesTask):
 
 def find_unsupported_s3_urls(task: TesTask) -> List[str]:
     """
-    Returns the fields (e.g. ``inputs[0].url``) holding S3 URLs that are not plain ``s3://bucket/key``, and S3
-    directory inputs, which are not supported. Legacy ``s3://user:pass@host:port/bucket/key`` URLs are refused so
+    Returns the fields (e.g. ``inputs[0].url``) holding S3 URLs that are not plain ``s3://bucket/key``, plus S3
+    directory inputs and S3 outputs, which are not supported yet. Legacy ``s3://user:pass@host:port/bucket/key`` URLs are refused so
     credentials never get stored with a task. The URLs themselves are not returned, so callers can put the result
     into responses and logs.
     """
@@ -252,5 +252,5 @@ def find_unsupported_s3_urls(task: TesTask) -> List[str]:
         for field, items in (("inputs", task.inputs), ("outputs", task.outputs))
         for i, item in enumerate(items or [])
         if isinstance(item.url, S3Url) and (
-            not item.url.is_plain() or (field == "inputs" and item.type == TesTaskIOType.DIRECTORY))
+            not item.url.is_plain() or field == "outputs" or item.type == TesTaskIOType.DIRECTORY)
     ]

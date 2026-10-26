@@ -71,7 +71,7 @@ The `docker/dts/` directory contains an **alternative** test infrastructure with
 
 ## S3
 
-`test_s3_input` and `test_s3_legacy_url_rejected` use the `minio` service from the root `docker-compose.yaml` (profile `pulsar`, port 9000), which creates the `tesp-test` bucket; the test uploads its object from the host via `localhost:9000`. `tesp-api` only signs URLs for `http://172.17.0.1:9000` with the test credentials from `docker-compose.yaml`; the Pulsar staging containers download from there. Like the other fixtures this relies on the default Docker bridge gateway on Linux.
+`test_s3_input` and `test_s3_legacy_url_rejected` use the `minio` service from the root `docker-compose.yaml` (profile `pulsar`, port 9000), which creates the `tesp-test` bucket; the test uploads its object from the host. MinIO is published on the docker bridge address only (`172.17.0.1:9000`). `tesp-api` only signs URLs for `http://172.17.0.1:9000` with the test credentials from `docker-compose.yaml`; the Pulsar staging containers download from there. Like the other fixtures this relies on the default Docker bridge gateway on Linux.
 
 ### Using DTS instead of upload_server.py
 

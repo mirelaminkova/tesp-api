@@ -13,6 +13,9 @@ from tesp_api.service.client.client_s3 import S3Config, load_s3_config, presign_
     redact_presigned_urls
 from tesp_api.utils.container import stage_in_command, untraced
 from tesp_api.utils.types import S3Url
+from tesp_api.api.error import redact_validation_errors
+from tesp_api.config.log_config import logg_configure
+from loguru import logger
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ACCESS_KEY = "AKIATESTACCESSKEY"
@@ -73,8 +76,20 @@ def test_s3_directory_input_is_reported():
     assert find_unsupported_s3_urls(task) == ["inputs[0].url"]
 
 
-def test_plain_s3_task_has_no_unsupported_urls():
-    assert find_unsupported_s3_urls(_task("s3://bucket/in.txt", "s3://bucket/out.txt")) == []
+def test_plain_s3_input_is_supported():
+    assert find_unsupported_s3_urls(_task("s3://bucket/in.txt")) == []
+
+
+def test_s3_outputs_are_reported_until_supported():
+    assert find_unsupported_s3_urls(_task(output_url="s3://bucket/out.txt")) == ["outputs[0].url"]
+
+
+def test_validation_errors_do_not_echo_legacy_secrets():
+    with pytest.raises(pydantic.ValidationError) as error:
+        _task("s3://AKIA:secret/with-slash@host:9000/bucket/key")
+    redacted = redact_validation_errors(error.value.errors())
+    assert redacted and all(e["loc"] == ("inputs", 0, "url") for e in redacted)
+    assert "with-slash" not in repr(redacted)
 
 
 def test_legacy_s3_urls_are_reported_by_field_without_echoing_them():
@@ -230,3 +245,29 @@ def test_untraced_command_is_not_in_shell_trace():
     assert "X-Amz-Signature" not in result.stderr
     assert "set +x" not in result.stderr
     assert "+ echo after" in result.stderr  # tracing is back on
+
+
+# --- logging -----------------------------------------------------------------
+
+def test_presigning_logs_no_signature_or_credential(capsys):
+    logg_configure()
+    signed = presign_get_url(_s3("s3://my-bucket/logged.txt"), SIGNED)
+    out = capsys.readouterr().out
+    assert parse_qs(urlsplit(signed).query)["X-Amz-Signature"][0] not in out
+    assert ACCESS_KEY not in out
+
+
+def test_logged_tracebacks_do_not_show_local_variables(capsys):
+    logg_configure()
+
+    def submit(command):
+        raise ConnectionError("pulsar unreachable")
+
+    run_command_str = "curl 'https://s3.example.org/b/k?X-Amz-Signature=deadbeef'"
+    try:
+        submit(run_command_str)
+    except ConnectionError:
+        logger.opt(exception=True).error("submit failed")
+    out = capsys.readouterr().out
+    assert "pulsar unreachable" in out
+    assert "deadbeef" not in out
