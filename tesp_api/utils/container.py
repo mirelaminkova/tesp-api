@@ -188,7 +188,7 @@ class ContainerCommandBuilder:
         docker = self.container_type == "docker"
 
         # Common resource flags
-        cpu_flag = self._resource_cpu.maybe("", lambda cpu: f"--cpus={cpu}" if docker else f"--cpu={cpu}")
+        cpu_flag = self._resource_cpu.maybe("", lambda cpu: f"--cpus={cpu}" if docker else f"--cpus={cpu}")
         mem_flag = self._resource_mem.maybe("", lambda mem: f"--memory={mem}g" if docker else f"--memory={mem}G")
 
         # Environment variables
