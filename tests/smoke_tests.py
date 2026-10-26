@@ -457,3 +457,25 @@ def test_s3_outputs():
     }
     _assert_skipped(task_id, ["/data/s3_out/missing.txt", "/data/s3_out/missing_dir"])
     _assert_no_s3_secrets_stored(task_id)
+
+# The job script is not traced (issue #18): executor env values, presigned S3 URLs and the host container commands
+# must not show up in the task's stored stdout/stderr logs.
+def test_job_script_not_in_task_logs():
+    _s3_put_test_object("smoke/trace/input.txt", b"in")  # staged in only so the job holds a presigned GET URL
+    token = f"trace-{time.time_ns()}"
+    task = {
+        "inputs": [{"path": "/data/trace/in.txt", "url": f"s3://{S3_TEST_BUCKET}/smoke/trace/input.txt", "type": "FILE"}],
+        "outputs": [{"path": "/data/trace/out.txt", "url": f"s3://{S3_TEST_BUCKET}/smoke/trace/{token}.txt",
+                     "type": "FILE"}],
+        "executors": [{"image": "ubuntu", "command": ["sh", "-c", "echo hi && echo hi > /data/trace/out.txt"],
+                       "env": {"SECRET": "s3cr3t"}}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
+
+    stdout, stderr = _executor_logs(task_id, "stdout"), _executor_logs(task_id, "stderr")
+    assert "hi" in stdout
+    for leaked in ("s3cr3t", "X-Amz-Signature", "singularity exec", "docker run"):
+        assert leaked not in stdout, leaked
+        assert leaked not in stderr, leaked
+    _assert_no_s3_secrets_stored(task_id)

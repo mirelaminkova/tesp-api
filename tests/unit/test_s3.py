@@ -1,7 +1,6 @@
 """Unit tests for plain ``s3://bucket/key`` inputs with server-side S3 settings (issue #3)."""
 import json
 import os
-import subprocess
 
 import pydantic
 import pytest
@@ -12,7 +11,7 @@ from tesp_api.repository.model.task import TesTask, TesTaskIOType, find_unsuppor
 from tesp_api.repository.model.task import TesTaskExecutor
 from tesp_api.service.client.client_s3 import S3Config, load_s3_config, presign_get_url, presign_s3_inputs, \
     redact_presigned_urls
-from tesp_api.utils.container import stage_in_command, untraced
+from tesp_api.utils.container import stage_in_command
 from tesp_api.utils.types import S3Url
 from tesp_api.api.error import redact_validation_errors
 from tesp_api.config.log_config import logg_configure
@@ -236,16 +235,6 @@ def test_presign_s3_inputs_rejects_directories():
 def test_presign_s3_inputs_rejects_legacy_urls_of_stored_tasks():
     with pytest.raises(ValueError):
         presign_s3_inputs([_input_conf(_s3("s3://user:pass@host:9000/bucket/key"))], SIGNED)
-
-
-def test_untraced_command_is_not_in_shell_trace():
-    signed = presign_get_url(_s3("s3://my-bucket/in.txt"), SIGNED)
-    script = f"set -xe && echo before && {untraced(f'test -n {signed!r}')} && echo after"
-    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert "X-Amz-Signature" not in result.stderr
-    assert "set +x" not in result.stderr
-    assert "+ echo after" in result.stderr  # tracing is back on
 
 
 # --- logging -----------------------------------------------------------------

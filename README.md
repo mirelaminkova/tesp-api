@@ -220,7 +220,8 @@ TESP_API_S3__SECRET_ACCESS_KEY=...
 
 How it works: when a task starts, `TESP API` turns each S3 input into a presigned `GET` URL (computed locally, no request
 to S3) and the Pulsar staging container downloads it with `curl`. The secret key never leaves `TESP API`. The presigned
-URLs are kept out of the job's shell trace (stored as the task's stderr) and out of the `TESP API` log of the job command,
+URLs are kept out of the task's stored stdout/stderr (the job script Pulsar runs is not traced, so neither the
+container commands nor executor env values are echoed there) and out of the `TESP API` log of the job command,
 so they are not stored with the task; botocore's debug logging, which would show the signature, is turned off. They are part of the job command sent to Pulsar (as a query parameter of the
 Pulsar REST call), so they can appear in Pulsar's and any proxy's logs until they expire. Keep
 `s3.presign_expiry_seconds` no longer than the time tasks may wait in Pulsar before staging starts.
