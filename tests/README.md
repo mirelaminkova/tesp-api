@@ -11,7 +11,7 @@ Tests for TESP-API come in three kinds:
 - **Integration tests** (described below) run against a live TESP-API instance at `http://localhost:8080`.
 - **The GA4GH TES conformance suite** (see [below](#ga4gh-tes-conformance-suite)) runs against the same live instance.
 
-CI (`.github/workflows/ci.yaml`) runs all three on every pull request and on pushes to `main`.
+CI (`.github/workflows/ci.yaml`) runs all three on every pull request and on pushes to `main`, plus a Nextflow end-to-end run (see [below](#nextflow-end-to-end-test)).
 
 ## Prerequisites
 
@@ -89,6 +89,21 @@ The only change it makes to the suite is lowering the per-task polling timeout f
 - `WORK_DIR`: where the runner, virtualenv and reports go (default `.conformance` in the repository root)
 
 CI runs the same script in the `conformance` job (with its work directory outside the checkout, which compose bind-mounts into the auto-reloading server) and uploads the report directory as the `conformance-report` artefact. Failures don't fail CI yet; each one is tracked as a `tes-compliance` sub-issue of #2.
+
+### Nextflow end-to-end test
+
+`tests/e2e/nextflow/` is a two-process Nextflow pipeline that runs through TESP-API with the [nf-ga4gh](https://github.com/nextflow-io/nf-ga4gh) TES executor and its work directory on the compose MinIO (`SHOUT` reads the file `GREET` wrote). It needs Java 17+, the AWS CLI and the Nextflow version pinned as `NXF_VER` in the `nextflow-e2e` job of `.github/workflows/ci.yaml`; `nextflow.config` pins the plugin. With the stack up (see Prerequisites):
+
+```bash
+export AWS_ACCESS_KEY_ID=tesp-test AWS_SECRET_ACCESS_KEY=tesp-test-secret AWS_DEFAULT_REGION=us-east-1
+aws --endpoint-url http://172.17.0.1:9000 s3 mb s3://nextflow-e2e   # once per MinIO volume
+REPO=$PWD
+cd "$(mktemp -d)"   # keep .nextflow/ and the logs out of the checkout, which the server reloads from
+NXF_VER=25.10.8 nextflow run "$REPO/tests/e2e/nextflow/main.nf" -c "$REPO/tests/e2e/nextflow/nextflow.config" --outdir results
+cat results/shout.txt   # HELLO FROM TESP-API
+```
+
+The config reads `TES_ENDPOINT` (default `http://localhost:8080`), `S3_ENDPOINT` (default `http://172.17.0.1:9000`, the address TESP-API presigns against) and `NXF_E2E_WORK_DIR` (default `s3://nextflow-e2e/work`). CI runs the same pipeline in the `nextflow-e2e` job and also checks that TESP-API ran both tasks. It scans the Nextflow log, the compose logs and the `GET /v1/tasks?view=FULL` dump for credentials and presigned URLs. A match fails the job; the matching lines are replaced, and on failure the logs are uploaded as the `nextflow-e2e-logs` artefact. The step output in the job log is not scanned.
 
 ## Platform Notes
 
