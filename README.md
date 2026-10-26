@@ -330,7 +330,7 @@ longer configured to redirect stdout into the file.
 | _TES_    | Only `cpu_cores` and `ram_gb` are mapped to container runtime flags. Other resource fields (disk, preemptible, zones) are stored but not enforced.                                  |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
-| _TES_    | When an executor sets `stdin`, `stdout` or `stderr`, its image must provide `sh`. `logs.logs.stdout`/`stderr` then hold the last 64 KiB of each redirected stream, filtered to printable ASCII (needs `tail` and `tr` in the image). |
+| _TES_    | When an executor sets `stdin`, `stdout` or `stderr`, its image must provide `sh`. `logs.logs.stdout`/`stderr` then hold the last 64 KiB of each redirected stream, filtered to printable ASCII, so non-ASCII text is dropped from the log (the file keeps the exact bytes); without `tail`/`tr` in the image the log copy is empty. |
 
 &nbsp;
 

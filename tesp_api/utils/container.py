@@ -151,9 +151,12 @@ class ContainerCommandBuilder:
         ]
         # Echo the tail of redirected files to the job's streams so ExecutorLog still gets them.
         if stdout:
-            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stdout)} 2>/dev/null | {ASCII_TEXT_FILTER}")
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stdout)} 2>/dev/null"
+                          f" | {ASCII_TEXT_FILTER} 2>/dev/null")
         if stderr and not same_file:
-            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stderr)} 2>/dev/null | {ASCII_TEXT_FILTER} >&2")
+            # >&2 before 2>/dev/null: the copy goes to the original stderr, tr's own errors are dropped
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stderr)} 2>/dev/null"
+                          f" | {ASCII_TEXT_FILTER} >&2 2>/dev/null")
         script.append("exit $rc")
         return "; ".join(script)
 
@@ -247,12 +250,6 @@ def stage_in_command(
     input_confs: List[dict],
     container_type: str
 ) -> str:
-    builder = ContainerCommandBuilder(container_type) \
-        .with_image(executor.image) \
-        .with_workdir(executor.workdir) \
-        .with_resource(resource_conf) \
-        .with_directory(bind_mount)
-
     commands = []
     for input_conf in input_confs:
         url = input_conf.get('url')
@@ -276,7 +273,13 @@ def stage_in_command(
     # Inline (content) inputs are uploaded to Pulsar directly, so there may be nothing to download
     if not commands:
         return ""
-    builder.with_command(["sh", "-c", " && ".join(commands)])
+
+    builder = ContainerCommandBuilder(container_type) \
+        .with_image(executor.image) \
+        .with_workdir(executor.workdir) \
+        .with_resource(resource_conf) \
+        .with_directory(bind_mount) \
+        .with_command(["sh", "-c", " && ".join(commands)])
 
     builder.with_bind_mount(executor.workdir, bind_mount)
     

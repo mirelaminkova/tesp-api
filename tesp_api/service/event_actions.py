@@ -19,7 +19,7 @@ from tesp_api.repository.task_repository import task_repository
 from tesp_api.service.file_transfer_service import file_transfer_service
 from tesp_api.service.client.client_s3 import presign_s3_inputs, redact_presigned_urls
 from tesp_api.service.error import pulsar_event_handle_error, TaskNotFoundError, TaskExecutorError
-from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType, job_output
+from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType, job_streams
 from tesp_api.repository.model.task import (
     TesTaskState,
     TesTaskExecutor,
@@ -261,7 +261,7 @@ async def handle_run_task(event: Event) -> None:
         await append_task_executor_logs(
             task_id, author, TesTaskState.RUNNING,
             command_start_time, command_end_time,
-            *job_output(command_status),
+            *job_streams(command_status),
             command_status.get('returncode', -1)
         )
 

@@ -14,14 +14,22 @@ from aiohttp import ClientSession, ClientError
 from tesp_api.repository.model.task import TesTaskIOType
 
 
-def job_output(status: dict) -> Tuple[str, str]:
-    """Stdout and stderr of a completed Pulsar job's command line.
+# Pulsar returns job_stdout/job_stderr untruncated; keep the tail so task documents stay small
+# (TES: "no guarantees are made about how much of the stream is captured").
+MAX_JOB_STREAM_CHARS = 64 * 1024
+
+
+def job_streams(status: dict) -> Tuple[str, str]:
+    """Stdout and stderr of a completed Pulsar job's command line, tail only.
 
     Pulsar >= 0.15 reports them as `job_stdout`/`job_stderr`; its `stdout`/`stderr` are Galaxy's
-    tool_stdout/tool_stderr metadata files, which only older Pulsar filled from the command itself.
+    tool_stdout/tool_stderr metadata files, which TESP never writes, so they are only a fallback
+    for older Pulsar that filled them from the command itself.
     """
-    return (status.get('job_stdout') or status.get('stdout') or '',
-            status.get('job_stderr') or status.get('stderr') or '')
+    def tail(job_key: str, legacy_key: str) -> str:
+        return (status.get(job_key) or status.get(legacy_key) or '')[-MAX_JOB_STREAM_CHARS:]
+
+    return tail('job_stdout', 'stdout'), tail('job_stderr', 'stderr')
 
 
 class DataType(str, Enum):
