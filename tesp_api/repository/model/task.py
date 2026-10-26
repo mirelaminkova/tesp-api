@@ -1,3 +1,5 @@
+import os
+import re
 from datetime import datetime
 from enum import Enum
 from typing import List, Dict, Union
@@ -271,3 +273,43 @@ def find_unsupported_outputs(task: TesTask) -> List[str]:
         for i, output in enumerate(task.outputs or [])
         if not output.path.startswith("/") or any(c in output.path for c in "*?")
     ]
+
+
+ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# Separate the parts of `docker run --volume=host:container[:options]` and the binds of `singularity --bind`.
+MOUNT_PATH_SEPARATORS = (":", ",")
+
+
+def is_valid_env_name(name: str) -> bool:
+    return ENV_NAME_PATTERN.fullmatch(name) is not None
+
+
+def is_valid_image(image: str) -> bool:
+    """An image starting with ``-`` would be parsed as an option of ``docker run``."""
+    return not image.startswith("-")
+
+
+def is_valid_mount_path(path: Union[str, Path]) -> bool:
+    return not any(separator in str(path) for separator in MOUNT_PATH_SEPARATORS)
+
+
+def find_invalid_container_fields(task: TesTask) -> List[str]:
+    """
+    Returns the fields (e.g. ``executors[0].env``) holding values that cannot be passed safely to the container
+    runtime: environment variable names not matching ``[A-Za-z_][A-Za-z0-9_]*``, images starting with ``-`` and
+    mounted paths containing ``:`` or ``,`` (input paths, volumes and the directories of output paths, which are
+    mounted as volumes). The values themselves are not returned.
+    """
+    invalid = []
+    for i, executor in enumerate(task.executors):
+        if not all(is_valid_env_name(name) for name in executor.env or {}):
+            invalid.append(f"executors[{i}].env")
+        if not is_valid_image(executor.image):
+            invalid.append(f"executors[{i}].image")
+    invalid.extend(f"inputs[{i}].path" for i, item in enumerate(task.inputs or [])
+                   if not is_valid_mount_path(item.path))
+    invalid.extend(f"outputs[{i}].path" for i, item in enumerate(task.outputs or [])
+                   if not is_valid_mount_path(os.path.dirname(item.path)))
+    invalid.extend(f"volumes[{i}]" for i, volume in enumerate(task.volumes or [])
+                   if not is_valid_mount_path(volume))
+    return invalid
