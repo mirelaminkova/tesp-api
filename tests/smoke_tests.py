@@ -193,17 +193,37 @@ def test_envs():
 def test_workdir():
     assert _test_simple("workdir.json", 120)
 
-#def test_stdin():
-    #jsons = ['stdin-prepare', 'stdin-test']
-    #assert _test_sequence_simple(jsons, 120)
+def _executor_logs(task_id, stream):
+    """Return all ExecutorLog.<stream> values of a task, fetched with view=FULL."""
+    task = _get_request(f"/v1/tasks/{task_id}?view=FULL")
+    return "".join(
+        executor_log.get(stream) or ""
+        for task_log in task.get("logs") or []
+        for executor_log in task_log.get("logs") or []
+    )
 
-#def test_stdout():
-    #jsons = ['std-prepare-1', 'std-prepare-2', 'stdout-test-1', 'stdout-test-2', 'stdout-check']
-    #assert _test_sequence_simple(jsons, 180)
+def _read_uploaded(filename):
+    with open(f"{script_directory}/uploaded_data/{filename}", 'r') as f:
+        return f.read()
 
-#def test_stderr():
-    #jsons = ['std-prepare-1', 'std-prepare-2', 'stderr-test-1', 'stderr-test-2', 'stderr-check']
-    #assert _test_sequence_simple(jsons, 180)
+# Executor.stdin is piped to the command; its output shows up in ExecutorLog.stdout (view=FULL).
+def test_stdin():
+    task = _test_simple("stdin.json", 120)
+    assert "HELLO-WORLD-STDIN" in _executor_logs(_gnv(task, "id"), "stdout")
+
+# Executor.stdout is written to the given container path (checked by a second executor and by
+# uploading it as an output) and is also reported in ExecutorLog.stdout (view=FULL).
+def test_stdout():
+    task = _test_simple("stdout.json", 120)
+    assert _read_uploaded("stdout-test") == "hello-world-stdout\n"
+    assert "hello-world-stdout" in _executor_logs(_gnv(task, "id"), "stdout")
+
+# Executor.stderr is written to the given container path and is also reported in
+# ExecutorLog.stderr (view=FULL).
+def test_stderr():
+    task = _test_simple("stderr.json", 120)
+    assert _read_uploaded("stderr-test") == "hello-world-stderr\n"
+    assert "hello-world-stderr" in _executor_logs(_gnv(task, "id"), "stderr")
 
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
