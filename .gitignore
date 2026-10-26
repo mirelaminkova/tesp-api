@@ -143,3 +143,6 @@ dmypy.json
 
 # Conformance suite checkout, virtualenv and reports (tests/conformance.sh)
 .conformance/
+
+# Uploads and generated files of the integration tests (tests/upload_server.py, tests/large_file_tests.py)
+tests/uploaded_data/
