@@ -9,7 +9,9 @@ and execute it with the host's `sh`, using temporary files in place of container
 """
 import os
 import shlex
+import signal
 import subprocess
+import time
 
 import pytest
 from pymonad.maybe import Just, Nothing
@@ -17,7 +19,7 @@ from pymonad.maybe import Just, Nothing
 from tesp_api.repository.model.task import TesTaskExecutor
 from tesp_api.utils.container import ContainerCommandBuilder, STDIO_LOG_TAIL_BYTES, run_command
 
-IMAGE = "ubuntu"
+IMAGE = "stdio-test-image"
 
 
 def _container_argv(run_cmd: str, image: str = IMAGE):
@@ -33,8 +35,8 @@ def _build(command, stdin=Nothing, stdout=Nothing, stderr=Nothing, container_typ
     return _container_argv(builder.get_run_command(), image)
 
 
-def _run(argv):
-    return subprocess.run(argv, capture_output=True, text=True, timeout=10)
+def _run(argv, cwd=None):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=10, cwd=cwd)
 
 
 def test_command_without_streams_is_unchanged():
@@ -78,6 +80,8 @@ def test_all_streams_together(tmp_path):
     assert result.returncode == 0
     assert out.read_text() == "data\n"
     assert err.read_text() == "warn\n"
+    assert result.stdout == "data\n"
+    assert result.stderr == "warn\n"
 
 
 def test_exit_code_is_preserved(tmp_path):
@@ -86,6 +90,48 @@ def test_exit_code_is_preserved(tmp_path):
 
     assert result.returncode == 3
     assert out.read_text() == "partial\n"
+
+
+def test_exit_code_is_preserved_with_stderr(tmp_path):
+    err = tmp_path / "err"
+    result = _run(_build(["sh", "-c", "echo bad >&2; exit 5"], stderr=Just(str(err))))
+
+    assert result.returncode == 5
+    assert err.read_text() == "bad\n"
+    assert result.stderr == "bad\n"
+
+
+def test_empty_paths_are_ignored():
+    assert _build(["echo", "hello"], Just(""), Just(""), Just("")) == ["echo", "hello"]
+
+
+def test_same_file_for_stdout_and_stderr(tmp_path):
+    log = tmp_path / "log"
+    result = _run(_build(["sh", "-c", "echo out; echo err >&2"], stdout=Just(str(log)), stderr=Just(str(log))))
+
+    assert result.returncode == 0
+    assert log.read_text() == "out\nerr\n"
+    assert result.stdout == "out\nerr\n"
+    assert result.stderr == ""
+
+
+def test_path_starting_with_dash(tmp_path):
+    result = _run(_build(["echo", "hi"], stdout=Just("-n")), cwd=tmp_path)
+
+    assert result.returncode == 0
+    assert (tmp_path / "-n").read_text() == "hi\n"
+    assert result.stdout == "hi\n"
+
+
+def test_sigterm_is_forwarded_to_command(tmp_path):
+    proc = subprocess.Popen(_build(["sleep", "30"], stdout=Just(str(tmp_path / "out"))))
+    try:
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGTERM)
+        # sh exits with the child's status (128 + SIGTERM) instead of being killed itself
+        assert proc.wait(timeout=5) == 128 + signal.SIGTERM
+    finally:
+        proc.kill()
 
 
 def test_shell_wrapped_command_redirects_whole_script(tmp_path):

@@ -202,6 +202,12 @@ def _executor_logs(task_id, stream):
         for executor_log in task_log.get("logs") or []
     )
 
+def _remove_uploaded(filename):
+    """Remove a stale upload from an earlier run so it cannot mask a failed upload."""
+    path = f"{script_directory}/uploaded_data/{filename}"
+    if os.path.exists(path):
+        os.remove(path)
+
 def _read_uploaded(filename):
     with open(f"{script_directory}/uploaded_data/{filename}", 'r') as f:
         return f.read()
@@ -214,6 +220,7 @@ def test_stdin():
 # Executor.stdout is written to the given container path (checked by a second executor and by
 # uploading it as an output) and is also reported in ExecutorLog.stdout (view=FULL).
 def test_stdout():
+    _remove_uploaded("stdout-test")
     task = _test_simple("stdout.json", 120)
     assert _read_uploaded("stdout-test") == "hello-world-stdout\n"
     assert "hello-world-stdout" in _executor_logs(_gnv(task, "id"), "stdout")
@@ -221,6 +228,7 @@ def test_stdout():
 # Executor.stderr is written to the given container path and is also reported in
 # ExecutorLog.stderr (view=FULL).
 def test_stderr():
+    _remove_uploaded("stderr-test")
     task = _test_simple("stderr.json", 120)
     assert _read_uploaded("stderr-test") == "hello-world-stderr\n"
     assert "hello-world-stderr" in _executor_logs(_gnv(task, "id"), "stderr")

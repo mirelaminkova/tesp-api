@@ -120,22 +120,38 @@ class ContainerCommandBuilder:
             for arg in command
         )
 
+    @staticmethod
+    def _path(stream: Maybe[str]) -> str:
+        return stream.maybe("", lambda x: x)
+
     def _has_stdio(self) -> bool:
-        return any(stream.maybe("", lambda x: x) for stream in (self._stdin, self._stdout, self._stderr))
+        return any(self._path(stream) for stream in (self._stdin, self._stdout, self._stderr))
 
     def _stdio_script(self) -> str:
-        stdin = self._stdin.maybe("", lambda x: x)
-        stdout = self._stdout.maybe("", lambda x: x)
-        stderr = self._stderr.maybe("", lambda x: x)
+        stdin, stdout, stderr = (self._path(s) for s in (self._stdin, self._stdout, self._stderr))
+        same_file = bool(stdout) and stdout == stderr
 
         redirections = [f"{op} {shlex.quote(path)}" for op, path in
-                        (("<", stdin), (">", stdout), ("2>", stderr)) if path]
-        script = [" ".join(['"$@"', *redirections]), "rc=$?"]
+                        (("<", stdin), (">", stdout), ("2>", "" if same_file else stderr)) if path]
+        if same_file:
+            redirections.append("2>&1")
+
+        # sh runs as PID 1 in the container, which ignores SIGTERM unless trapped, so run the
+        # command in the background and forward termination to it (e.g. on task cancel).
+        script = [
+            " ".join(['"$@"', *redirections]) + " & pid=$!",
+            "trap 'kill -TERM $pid 2>/dev/null' TERM INT HUP",
+            "wait $pid",
+            "rc=$?",
+            # wait returns early when a trapped signal arrives; keep waiting for the real exit code
+            "while kill -0 $pid 2>/dev/null; do wait $pid; rc=$?; done",
+        ]
         # Echo the tail of redirected files to the job's streams so ExecutorLog still gets them.
         if stdout:
-            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} {shlex.quote(stdout)} 2>/dev/null")
-        if stderr:
-            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} {shlex.quote(stderr)} >&2 2>/dev/null")
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stdout)} 2>/dev/null")
+        if stderr and not same_file:
+            # >&2 first sends tail's output to the original stderr, then 2>/dev/null silences its errors
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stderr)} >&2 2>/dev/null")
         script.append("exit $rc")
         return "; ".join(script)
 
