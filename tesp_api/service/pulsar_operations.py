@@ -2,7 +2,7 @@ import asyncio
 import json
 import aio_pika
 from enum import Enum
-from typing import Literal, Tuple
+from typing import Literal, Optional, Tuple
 from abc import ABC, abstractmethod
 from urllib.parse import quote
 
@@ -64,7 +64,8 @@ class PulsarOperations(ABC):
     def setup_job(self, job_id: ObjectId): pass
 
     @abstractmethod
-    def run_job(self, job_id: ObjectId, run_command: str): pass
+    def run_job(self, job_id: ObjectId, run_command: str, submit_params: Optional[dict] = None):
+        """Submits the job; ``submit_params`` (e.g. ``native_specification``) go to Pulsar's job manager."""
 
     @abstractmethod
     def job_status_complete(self, job_id: str): pass
@@ -125,11 +126,14 @@ class PulsarRestOperations(PulsarOperations):
                 params=query_params, data=file_content.maybe("", lambda x: x)
             )).map(lambda json_result: json_result['path'])
 
-    def run_job(self, job_id: ObjectId, run_command: str):
+    def run_job(self, job_id: ObjectId, run_command: str, submit_params: Optional[dict] = None):
+        params = {'command_line': run_command}
+        if submit_params:
+            params['params'] = json.dumps(submit_params)
         return Promise(lambda resolve, reject: resolve(None))\
             .then(lambda nothing: self._pulsar_request(
                 path=f'/jobs/{str(job_id)}/submit', method='POST', response_type='BYTES',
-                params={'command_line': run_command})) \
+                params=params)) \
             .catch(self._reraise_custom)
 
     def download_output(self, job_id: ObjectId, file_name: str):
@@ -208,13 +212,12 @@ class PulsarAmqpOperations(PulsarOperations):
                 "job_id": str(job_id)
             })).catch(lambda e: PulsarOperationsError(e))
 
-    def run_job(self, job_id: ObjectId, run_command: str):
+    def run_job(self, job_id: ObjectId, run_command: str, submit_params: Optional[dict] = None):
+        message = {"type": "submit", "job_id": str(job_id), "command_line": run_command}
+        if submit_params:
+            message["submit_params"] = submit_params
         return Promise(lambda resolve, reject: resolve(None))\
-            .then(lambda _: self._send_message({
-                "type": "submit",
-                "job_id": str(job_id),
-                "command_line": run_command
-            })).catch(lambda e: PulsarOperationsError(e))
+            .then(lambda _: self._send_message(message)).catch(lambda e: PulsarOperationsError(e))
 
     def erase_job(self, task_id: ObjectId):
         return Promise(lambda resolve, reject: resolve(None))\
