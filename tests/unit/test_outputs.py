@@ -1,6 +1,7 @@
 """Unit tests for task outputs over HTTP and plain ``s3://bucket/key`` URLs (issue #4)."""
 import base64
 import datetime
+import inspect
 import json
 import os
 import shlex
@@ -188,6 +189,12 @@ def test_presign_s3_outputs_rejects_legacy_urls_of_stored_tasks():
         presign_s3_outputs([_output_conf(_s3("s3://user:pass@host:9000/bucket/key"))], SIGNED)
 
 
+def test_anonymous_post_policy_has_no_fields():
+    config = S3Config(endpoint_url="http://172.17.0.1:9000")
+    post = presign_post_policy(_s3("s3://public/results"), config)
+    assert post == {"url": "http://172.17.0.1:9000/public", "fields": {}, "key_prefix": "results/"}
+
+
 def test_redact_presigned_post_fields():
     staged = presign_s3_outputs(
         [_output_conf(_s3("s3://my-bucket/results"), "/data/results", TesTaskIOType.DIRECTORY)], SIGNED)
@@ -197,23 +204,33 @@ def test_redact_presigned_post_fields():
     redacted = redact_presigned_urls(script)
     assert signature not in redacted
     assert ACCESS_KEY not in redacted
+    assert "x-amz-credential=REDACTED" in redacted
 
 
 # --- stage-out script ---------------------------------------------------------------
 
+def _curl_unquote(value: str):
+    """Parses a double-quoted ``curl -F`` file name (backslash escapes ``\\`` and ``"``); returns it and the rest."""
+    assert value.startswith('"'), value
+    name, i = "", 1
+    while value[i] != '"':
+        if value[i] == "\\":
+            i += 1
+        name += value[i]
+        i += 1
+    return name, value[i + 1:]
+
+
 FAKE_CURL = """#!{python}
 import json, os, sys
+{unquote}
 args = sys.argv[1:]
 files = {{}}
 for i, arg in enumerate(args):
     if arg in ("-T", "--upload-file"):
         files[args[i + 1]] = open(args[i + 1]).read()
     if arg in ("-F", "--form") and "=@" in args[i + 1]:
-        path = args[i + 1].split("=@", 1)[1]
-        if path.startswith('"'):
-            path = path[1:path.index('"', 1)]
-        else:
-            path = path.split(";", 1)[0]
+        path, _ = _curl_unquote(args[i + 1].split("=@", 1)[1])
         files[path] = open(path).read()
 with open(os.environ["FAKE_CURL_LOG"], "a") as log:
     log.write(json.dumps({{"args": args, "cwd": os.getcwd(), "files": files}}) + "\\n")
@@ -227,7 +244,7 @@ def fake_curl(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     curl = bin_dir / "curl"
-    curl.write_text(FAKE_CURL.format(python=sys.executable))
+    curl.write_text(FAKE_CURL.format(python=sys.executable, unquote=inspect.getsource(_curl_unquote)))
     curl.chmod(curl.stat().st_mode | stat.S_IEXEC)
     log = tmp_path / "curl.log"
     monkeypatch.setenv("FAKE_CURL_LOG", str(log))
@@ -251,6 +268,8 @@ def outputs_dir(tmp_path):
     (root / "results" / "sub dir").mkdir(parents=True)
     (root / "results" / "top.txt").write_text("top\n")
     (root / "results" / "sub dir" / "it's nested.txt").write_text("nested\n")
+    # curl -F parses ; and , after a file name unless it is quoted, with " and \ escaped.
+    (root / "results" / 'a;type=x,y "q" \\b.txt').write_text("special\n")
     (root / "out file.txt").write_text("single\n")
     return root
 
@@ -273,10 +292,17 @@ def test_http_directory_output_keeps_structure(fake_curl, outputs_dir):
     path = str(outputs_dir / "results")
     result, calls = fake_curl([_output_conf(UPLOAD_URL, path, TesTaskIOType.DIRECTORY)])
     assert result.returncode == 0, result.stderr
-    names = sorted(form.split('filename="', 1)[1].rstrip('"') for call in calls for form in _form(call)
-                   if 'filename="' in form)
-    assert names == ["sub dir/it's nested.txt", "top.txt"]
-    assert sorted(content for call in calls for content in call["files"].values()) == ["nested\n", "top\n"]
+    names = []
+    for call in calls:
+        [form] = _form(call)
+        path, rest = _curl_unquote(form[len("file=@"):])
+        assert rest.startswith(";filename=")
+        name, rest = _curl_unquote(rest[len(";filename="):])
+        assert (path, rest) == (name, "")
+        names.append(name)
+    assert sorted(names) == ['a;type=x,y "q" \\b.txt', "sub dir/it's nested.txt", "top.txt"]
+    assert sorted(content for call in calls for content in call["files"].values()) == \
+        ["nested\n", "special\n", "top\n"]
     assert all(call["args"][-1] == UPLOAD_URL for call in calls)
 
 
@@ -298,7 +324,7 @@ def test_s3_directory_output_posts_each_file_under_the_prefix(fake_curl, outputs
         [_output_conf(_s3("s3://my-bucket/work/results"), path, TesTaskIOType.DIRECTORY)], SIGNED)
     result, calls = fake_curl(staged)
     assert result.returncode == 0, result.stderr
-    assert len(calls) == 2
+    assert len(calls) == 3
     keys = []
     for call in calls:
         args = call["args"]
@@ -308,8 +334,10 @@ def test_s3_directory_output_posts_each_file_under_the_prefix(fake_curl, outputs
         keys.append(fields["key"])
         # S3 ignores form fields after the file, so the file goes last.
         assert args[-3] == "-F" and args[-2].startswith("file=@")
-    assert sorted(keys) == ["work/results/sub dir/it's nested.txt", "work/results/top.txt"]
-    assert sorted(content for call in calls for content in call["files"].values()) == ["nested\n", "top\n"]
+    assert sorted(keys) == ['work/results/a;type=x,y "q" \\b.txt', "work/results/sub dir/it's nested.txt",
+                           "work/results/top.txt"]
+    assert sorted(content for call in calls for content in call["files"].values()) == \
+        ["nested\n", "special\n", "top\n"]
 
 
 def test_missing_outputs_are_skipped(fake_curl, tmp_path):
@@ -323,6 +351,14 @@ def test_missing_outputs_are_skipped(fake_curl, tmp_path):
     assert result.returncode == 0, result.stderr
     assert calls == []
     assert result.stderr.count("not found, skipped") == 4
+
+
+@pytest.mark.parametrize("io_type", [TesTaskIOType.FILE, TesTaskIOType.DIRECTORY])
+def test_output_of_the_wrong_type_fails_the_stage_out(fake_curl, outputs_dir, io_type):
+    path = str(outputs_dir / ("results" if io_type == TesTaskIOType.FILE else "out file.txt"))
+    result, _ = fake_curl([_output_conf(UPLOAD_URL, path, io_type)])
+    assert result.returncode != 0
+    assert "skipped" not in result.stderr
 
 
 def test_missing_output_does_not_stop_later_outputs(fake_curl, outputs_dir, tmp_path):

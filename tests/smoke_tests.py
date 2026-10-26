@@ -198,6 +198,15 @@ def test_outputs():
         with open(f"{uploaded}/{name}") as f:
             assert f.read() == content, name
     assert not os.path.exists(f"{uploaded}/outputs_http_missing.txt")
+    _assert_skipped(task_id, ["/data/http_out/outputs_http_missing.txt", "/data/http_out/outputs_http_missing_dir"])
+
+def _assert_skipped(task_id, paths):
+    """The stage-out script reports each skipped output on a line of its own in the task's stderr."""
+    task = _get_request(f"/v1/tasks/{task_id}?view=FULL")
+    stderr_lines = [line for log in task["logs"] for executor_log in log["logs"]
+                    for line in (executor_log.get("stderr") or "").splitlines()]
+    for path in paths:
+        assert f"tesp-api: output {path} not found, skipped" in stderr_lines, path
 
 # Downloads and copies file to the shared volume and displays its content with two separate executors.
 def test_volumes():
@@ -378,4 +387,5 @@ def test_s3_outputs():
         f"{prefix}/results/top.txt": f"top-{token}\n",
         f"{prefix}/results/sub dir/nested.txt": f"nested-{token}\n",
     }
+    _assert_skipped(task_id, ["/data/s3_out/missing.txt", "/data/s3_out/missing_dir"])
     _assert_no_s3_secrets_stored(task_id)

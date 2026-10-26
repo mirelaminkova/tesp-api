@@ -356,7 +356,10 @@ def stage_out_command(
     return builder.get_run_command()
 
 def _curl_quoted(value: str) -> str:
-    """``value`` as a double-quoted file name in a ``curl -F`` argument, so ``;`` and ``,`` are not parsed."""
+    """
+    ``value`` as a double-quoted file name in a ``curl -F`` argument, so ``;`` and ``,`` are not parsed. The sed in
+    ``_DIRECTORY_LOOP`` applies the same escaping in the shell.
+    """
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
@@ -386,7 +389,8 @@ def _directory_upload(conf: dict, path: str) -> str:
         # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
         upload = f"curl -fsS -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
     loop = _DIRECTORY_LOOP.replace("{upload}", upload)
-    # -L uploads the targets of symbolic links, as for FILE outputs.
+    # -L uploads the targets of symbolic links, as for FILE outputs. find exits non-zero, failing the stage-out, if an
+    # upload fails, an entry is unreadable or symbolic links form a loop.
     return f"( cd {shlex.quote(path)} && find -L . -type f -exec sh -c {shlex.quote(loop)} sh {{}} + )"
 
 
@@ -403,11 +407,12 @@ def stage_out_script(output_confs: List[dict]) -> str:
     for conf in output_confs:
         path = conf['container_path']
         if conf.get('type', TesTaskIOType.FILE) == TesTaskIOType.DIRECTORY:
-            test, upload = '-d', _directory_upload(conf, path)
+            upload = _directory_upload(conf, path)
         else:
-            test, upload = '-e', _file_upload(conf, path)
+            upload = _file_upload(conf, path)
+        # Only a path that does not exist is skipped; one of the wrong type makes the upload (cd or curl) fail.
         skipped = shlex.quote(f"tesp-api: output {path} not found, skipped")
-        commands.append(f"if [ {test} {shlex.quote(path)} ]; then {upload}; else echo {skipped} >&2; fi")
+        commands.append(f"if [ -e {shlex.quote(path)} ]; then {upload}; else echo {skipped} >&2; fi")
     return " && ".join(commands)
 
 def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):

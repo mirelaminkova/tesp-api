@@ -210,6 +210,7 @@ Limitations:
 - Keys are used literally, without percent-decoding. URLs with a query (e.g. `?versionId=`) or fragment are refused.
 - S3 `DIRECTORY` inputs are not supported yet and are refused with `400 Bad Request`.
 - Output paths with wildcards (TES 1.1 `path_prefix`) are not supported.
+- A `DIRECTORY` output needs a key prefix: `s3://bucket` and `s3://bucket/` are refused with `400 Bad Request`.
 - The upload URLs are created when the task starts running. A task that runs longer than
   `s3.output_presign_expiry_seconds` fails to upload its S3 outputs.
 - The endpoint must be reachable from the Pulsar staging containers. For HTTPS endpoints with a private CA, the
@@ -343,6 +344,7 @@ longer configured to redirect stdout into the file.
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
 | _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's stderr) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
+| _TES_    | Outputs are uploaded to `s3://` URLs and to HTTP(S) upload endpoints (multipart `POST`, form field `file`). Other URLs, such as the `ftp://` output in the example above, get the same `curl` multipart `POST`, which is not an FTP upload, so FTP outputs do not work. |
 | _TES_    | `DIRECTORY` outputs upload every file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). |
 
 &nbsp;
