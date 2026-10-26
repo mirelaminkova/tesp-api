@@ -234,6 +234,8 @@ jobs:
       AWS_ACCESS_KEY_ID: tesp-test
       AWS_SECRET_ACCESS_KEY: tesp-test-secret
       AWS_DEFAULT_REGION: us-east-1  # for the aws CLI; MinIO ignores it
+      # Same stack as the integration job: tesp-api capped at 512 MiB.
+      COMPOSE_FILE: docker-compose.yaml:tests/compose.mem-limit.yaml
     steps:
       - name: set paths
         # Outside the checkout: compose bind-mounts it into the auto-reloading tesp-api container.
@@ -337,7 +339,8 @@ jobs:
         if: always()
         run: |
           cd "$E2E_DIR/logs"
-          docker compose --project-directory "$GITHUB_WORKSPACE" --profile pulsar logs --no-color > compose.log 2>&1 || true
+          # COMPOSE_FILE is relative to the checkout.
+          (cd "$GITHUB_WORKSPACE" && docker compose --profile pulsar logs --no-color) > compose.log 2>&1 || true
           # The TES view of every task Nextflow submitted (stored s3:// URLs, states, executor logs).
           curl -fsS "http://localhost:8080/v1/tasks?view=FULL" > tasks.json 2>&1 || true
           # Never upload credentials or presigned URLs. A leak fails the job (and names the files);
