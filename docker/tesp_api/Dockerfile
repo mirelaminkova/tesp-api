@@ -2,7 +2,8 @@
 # See https://docs.docker.com/develop/develop-images/multistage-build/
 
 # Environment variables and base image
-FROM python:3.10-slim-bullseye as python-base
+# Debian bullseye is EOL (its security repo 404s); pinned by digest for reproducible builds.
+FROM python:3.10-slim-bookworm@sha256:5be5aaecb962a41567bc8041f1e9e3432cb085b037fe057f9a562630b2e4b370 as python-base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=off \
