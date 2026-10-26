@@ -188,7 +188,7 @@ def _record_rest_requests(ops: PulsarRestOperations) -> list:
 
 
 def test_rest_submit_sends_params():
-    ops = PulsarRestOperations(None, "http://pulsar", 1, 1)
+    ops = PulsarRestOperations(None, "http://pulsar")
     calls = _record_rest_requests(ops)
     _run(ops.run_job("job", "true", {'native_specification': "--cpus-per-task=2"}))
     assert calls[0]['path'] == "/jobs/job/submit"
@@ -197,7 +197,7 @@ def test_rest_submit_sends_params():
 
 
 def test_rest_submit_without_params():
-    ops = PulsarRestOperations(None, "http://pulsar", 1, 1)
+    ops = PulsarRestOperations(None, "http://pulsar")
     calls = _record_rest_requests(ops)
     _run(ops.run_job("job", "true"))
     assert calls[0]['params'] == {'command_line': "true"}
@@ -205,7 +205,7 @@ def test_rest_submit_without_params():
 
 @pytest.mark.parametrize("submit_params", [{}, {'native_specification': "--mem=1024"}])
 def test_amqp_submit_sends_params(submit_params):
-    ops = PulsarAmqpOperations("amqp://x", None, "http://pulsar", 1, 1)
+    ops = PulsarAmqpOperations("amqp://x", None, "http://pulsar")
     messages = []
 
     async def fake_send(message, routing_key="pulsar.queue"):

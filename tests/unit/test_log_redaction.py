@@ -124,7 +124,7 @@ async def _with_pulsar_stub(handler, scenario):
         trace_config = aiohttp.TraceConfig()
         trace_config.on_request_start.append(log_pulsar_request)
         async with aiohttp.ClientSession(trace_configs=[trace_config]) as session:
-            operations = PulsarRestOperations(session, str(server.make_url("")).rstrip("/"), 0, 1)
+            operations = PulsarRestOperations(session, str(server.make_url("")).rstrip("/"))
             await scenario(operations, received)
     finally:
         await server.close()

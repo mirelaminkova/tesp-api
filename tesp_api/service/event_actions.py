@@ -20,7 +20,9 @@ from tesp_api.service.event_handler import Event, local_handler
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.service.file_transfer_service import file_transfer_service
 from tesp_api.service.client.client_s3 import presign_s3_inputs, presign_s3_outputs, redact_presigned_urls
-from tesp_api.service.error import pulsar_event_handle_error, TaskNotFoundError, TaskExecutorError
+from tesp_api.service.error import pulsar_event_handle_error, pulsar_cancel_task_promise, TaskNotFoundError, \
+    TaskExecutorError
+from tesp_api.service.job_polling import TaskCanceledError
 from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType, job_streams
 from tesp_api.repository.model.task import (
     TesTaskState,
@@ -258,7 +260,13 @@ async def handle_run_task(event: Event) -> None:
         else:
             logger.debug(f"Submitting job to Pulsar for task {task_id}: {redact_presigned_urls(run_command_str)}")
             await pulsar_operations.run_job(task_id, run_command_str, submit_params)
-            command_status = await pulsar_operations.job_status_complete(str(task_id))
+
+            # POST /tasks/{id}:cancel only marks the task; polling notices it and ends the Pulsar job below.
+            async def is_canceled() -> bool:
+                task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
+                return task_monad.is_just() and task_monad.value.state == TesTaskState.CANCELED
+
+            command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled)
 
         command_end_time = datetime.datetime.now(datetime.timezone.utc)
         await append_task_executor_logs(
@@ -293,6 +301,10 @@ async def handle_run_task(event: Event) -> None:
             .then(lambda ignored: pulsar_operations.erase_job(task_id)) \
             .catch(lambda error: pulsar_event_handle_error(error, task_id, event_name, pulsar_operations)) \
             .then(lambda x: x)
+
+    except TaskCanceledError:
+        logger.info(f"Task {task_id} was canceled while its Pulsar job ran. Stopped polling, canceling the job.")
+        await pulsar_cancel_task_promise(str(task_id), pulsar_operations)
 
     except asyncio.CancelledError:
         logger.warning(f"handle_run_task for task {task_id} was explicitly cancelled (asyncio.CancelledError).")

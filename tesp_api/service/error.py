@@ -8,6 +8,7 @@ from pymonad.promise import Promise
 from tesp_api.repository.model.task import TesTaskState
 from tesp_api.repository.error import CustomDataLayerError
 from tesp_api.repository.task_repository import task_repository
+from tesp_api.service.job_polling import PulsarJobTimeoutError
 from tesp_api.service.pulsar_operations import PulsarOperations, PulsarLayerConnectionError, PulsarOperationsError
 
 
@@ -86,6 +87,14 @@ def pulsar_event_handle_error(error: Exception, task_id: ObjectId,
             logger.opt(exception=True).error(f'Data layer error occurred while executing task event [event_name: {event_name}, '
                          f'task_id: {task_id_str}]. Will try to request Pulsar for job cancellation if possible.')
             return pulsar_cancel_task_promise(str(task_id), pulsar_operations)
+
+        case PulsarJobTimeoutError() as timeout_error:
+            logger.warning(f'Task [id: {task_id_str}] reached the wait limit while executing event '
+                           f'[event_name: {event_name}, msg: {timeout_error}]. Will cancel its Pulsar job and set '
+                           f'the task to SYSTEM_ERROR.')
+            syslog: Maybe[str] = Just(f'{timeout_error}; the Pulsar job was canceled')
+            return pulsar_cancel_task_promise(task_id_str, pulsar_operations)\
+                .then(lambda ignored: repo_update_error_task_promise(task_id, TesTaskState.SYSTEM_ERROR, syslog))
 
         case PulsarLayerConnectionError() as pulsar_layer_connection_error:
             logger.opt(exception=True).error(f'Pulsar connection error occurred while executing task event [event_name: {event_name}, '

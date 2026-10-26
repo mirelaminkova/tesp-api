@@ -11,8 +11,10 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 from loguru import logger
+from multidict import CIMultiDict, CIMultiDictProxy
 from pymonad.maybe import Just
 from pymonad.promise import Promise
+from yarl import URL
 
 import tesp_api.service.error as error_module
 from tesp_api.repository.model.task import TesTaskState
@@ -21,7 +23,8 @@ from tesp_api.service.job_polling import (
     POLL_INTERVAL_GROWTH, PulsarJobTimeoutError, StatusPolling, TaskCanceledError, load_status_polling,
     poll_until_complete)
 from tesp_api.service.pulsar_operations import (
-    PulsarAmqpOperations, PulsarLayerConnectionError, PulsarOperationsError, PulsarRestOperations)
+    PulsarAmqpOperations, PulsarLayerConnectionError, PulsarOperationsError, PulsarRestOperations,
+    is_transient_pulsar_error)
 
 RUNNING = {'complete': 'false', 'status': 'running'}
 DONE = {'complete': 'true', 'status': 'complete', 'returncode': 0}
@@ -47,7 +50,9 @@ def _connection_error():
 
 
 def _http_error(status):
-    return PulsarLayerConnectionError(aiohttp.ClientResponseError(None, (), status=status, message='err'))
+    url = URL('http://pulsar/jobs/job1/status')
+    request_info = aiohttp.RequestInfo(url=url, method='GET', headers=CIMultiDictProxy(CIMultiDict()), real_url=url)
+    return PulsarLayerConnectionError(aiohttp.ClientResponseError(request_info, (), status=status, message='err'))
 
 
 class FakePulsar:
@@ -72,7 +77,7 @@ async def _never_canceled():
 def _poll(pulsar, polling=StatusPolling(), clock=None, is_canceled=_never_canceled):
     clock = clock or FakeClock()
     return asyncio.run(poll_until_complete(
-        pulsar.status, is_canceled, polling, sleep=clock.sleep, clock=clock.time)), clock
+        pulsar.status, is_canceled, polling, is_transient_pulsar_error, sleep=clock.sleep, clock=clock.time)), clock
 
 
 # --- No fixed poll count ------------------------------------------------------------------------------------------
@@ -192,7 +197,10 @@ def test_timeout_cancels_the_pulsar_job_and_records_system_error(monkeypatch):
         return Promise(lambda resolve, reject: resolve(Just(None)))
 
     monkeypatch.setattr(error_module.task_repository, 'update_task', update_task)
-    asyncio.run(pulsar_event_handle_error(PulsarJobTimeoutError(3600), 'abc', 'run_task', Operations()))
+    async def handle():
+        await pulsar_event_handle_error(PulsarJobTimeoutError(3600), 'abc', 'run_task', Operations())
+
+    asyncio.run(handle())
 
     assert erased == ['abc']
     [(query, update)] = updates
