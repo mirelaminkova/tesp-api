@@ -3,6 +3,7 @@
 
 # Environment variables and base image
 # Debian bullseye is EOL (its security repo 404s); pinned by digest for reproducible builds.
+# Bump: docker buildx imagetools inspect python:3.9-slim-bookworm
 FROM python:3.9-slim-bookworm@sha256:a02e9c5406c416c504d6c9a1a306ff4080c3173f1008d192f953bd20382a2d5c as python-base
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
