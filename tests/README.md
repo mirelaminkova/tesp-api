@@ -44,6 +44,18 @@ python3 -m pytest tests/smoke_tests.py -v
 python3 -m pytest tests/load_stress_test.py -v
 ```
 
+### GA4GH TES conformance suite
+
+With the stack up (see Prerequisites), run [ga4gh/openapi-test-runner](https://github.com/ga4gh/openapi-test-runner) against it:
+
+```bash
+bash tests/conformance.sh
+```
+
+The script fetches the runner at a pinned commit into `.conformance/`, installs it in a virtualenv there, and runs it once per TES version (`1.0.0` and `1.1.0` by default). It writes `report.json`, `run.log` and a `summary.md` table to `.conformance/report/<version>/` for each version. It exits 0 when every test passes, 1 when any test fails and 2 when the run itself breaks. The only change it makes to the suite is lowering the per-task polling timeout from 3600 s to `POLL_TIMEOUT` (600 s by default). The header of `tests/conformance.sh` lists the other variables it reads (`TES_URL`, `TES_VERSIONS`, `WORK_DIR`).
+
+CI runs the same script in the `conformance` job and uploads `.conformance/report/` as the `conformance-report` artefact. Failures don't fail CI yet; each one is tracked as a `tes-compliance` sub-issue of #2.
+
 ## Platform Notes
 
 The test fixtures use `http://172.17.0.1:5000` to reach the host from inside containers. This works on **Linux** (Docker bridge gateway IP).

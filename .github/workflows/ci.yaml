@@ -116,3 +116,80 @@ jobs:
           docker compose --profile pulsar ps -a
           docker compose --profile pulsar logs --no-color
           cat upload_server.log || true
+
+  # GA4GH TES conformance audit (issue #2). Known failures are tracked as
+  # tes-compliance sub-issues of #2, so for now a failing suite only raises a
+  # warning. Once those are closed, drop both continue-on-error keys to make
+  # this job required.
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v7
+
+      - name: set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: start compose stack
+        run: docker compose --profile pulsar up -d --build
+
+      - name: wait for tesp-api
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://localhost:8080/v1/service-info; then
+              echo "tesp-api is up"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "tesp-api did not answer on :8080 within 5 minutes" >&2
+          exit 1
+
+      - name: wait for pulsar
+        run: |
+          for _ in $(seq 1 60); do
+            # Any HTTP response means Pulsar is listening.
+            if docker compose --profile pulsar exec -T pulsar_rest curl -sS -o /dev/null http://localhost:8913/; then
+              echo "pulsar is up"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "pulsar did not answer on :8913 within 5 minutes" >&2
+          exit 1
+
+      - name: record service-info
+        run: |
+          mkdir -p .conformance/report
+          curl -fsS http://localhost:8080/v1/service-info | tee .conformance/report/service-info.json
+
+      - name: run conformance suite
+        id: suite
+        continue-on-error: true
+        run: bash tests/conformance.sh
+
+      - name: publish summary
+        if: always()
+        run: cat .conformance/report/*/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+
+      - name: flag failures
+        if: steps.suite.outcome == 'failure'
+        run: echo "::warning title=TES conformance::The suite reported failures; see the job summary and the conformance-report artefact."
+
+      - name: collect compose logs
+        if: always()
+        run: |
+          mkdir -p .conformance/report
+          docker compose --profile pulsar logs --no-color > .conformance/report/compose.log 2>&1 || true
+
+      - name: upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: conformance-report
+          path: .conformance/report/
+          if-no-files-found: error
