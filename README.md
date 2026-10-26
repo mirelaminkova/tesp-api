@@ -225,7 +225,7 @@ Values that cannot be passed safely are refused with `400 Bad Request`, naming t
 - environment variable names must match `[A-Za-z_][A-Za-z0-9_]*`;
 - images must be registry images: a Docker reference such as `alpine:3.20`, or a `docker://`, `library://`,
   `shub://` or `oras://` URI. Host paths (`/images/x.sif`, `./x`, or any image starting with `/`, `.` or `-`),
-  `instance://` and other URI schemes are refused, because Singularity would run a host directory or file as the
+  `instance://` and other URI schemes (matched case-sensitively) are refused, because Singularity would run a host directory or file as the
   container, as the Pulsar user. Pre-pulled `.sif` images on the Pulsar host are not supported;
 - input paths, volumes and the directories of output paths must not contain `:` or `,`, which separate mount specs for
   Docker and Singularity.

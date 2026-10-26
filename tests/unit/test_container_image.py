@@ -6,17 +6,19 @@ reference (prefixed with `docker://` for Singularity) or a `docker://`, `library
 """
 import pytest
 
-from tesp_api.repository.model.task import TesTask, find_invalid_container_fields, is_valid_image
+from tesp_api.repository.model.task import TesTask, find_invalid_container_fields, is_valid_image, \
+    REGISTRY_IMAGE_SCHEMES
 from tesp_api.utils.container import ContainerCommandBuilder
 
 CONTAINER_TYPES = ["docker", "singularity"]
 
 HOST_IMAGES = ["/", "/home/x", "/images/../etc", "/images/x.sif", "./rel", "../rel", ".", "..", ".hidden",
-               "instance://x", "INSTANCE://x", "file:///etc", "docker-daemon://x", "oci-archive://x.tar"]
+               "instance://x", "INSTANCE://x", "DOCKER://alpine", "file:///etc", "docker-daemon://x",
+               "oci-archive://x.tar", "https://depot.galaxyproject.org/singularity/x.sif", "--privileged", ""]
 REGISTRY_IMAGES = ["docker://alpine", "library://alpine", "shub://org/img", "oras://ghcr.io/org/img:1",
                    "alpine:3.20", "ubuntu", "quay.io/org/img:1.0", "myregistryhost:5000/fedora/httpd:1.0",
                    "alpine@sha256:" + "0" * 64, "rel/path"]
-URI_SCHEMES = ("docker://", "library://", "shub://", "oras://")
+URI_SCHEMES = tuple(f"{scheme}://" for scheme in REGISTRY_IMAGE_SCHEMES)
 
 
 @pytest.mark.parametrize("image", HOST_IMAGES)
@@ -47,13 +49,14 @@ def test_builder_rejects_host_image(container_type, image):
     # Tasks stored before the creation-time check reach the builder unchecked.
     with pytest.raises(ValueError) as error:
         ContainerCommandBuilder(container_type).with_image(image)
-    if image != "/":  # "/" is in the message itself
+    if len(image) > 1:  # "/" and "." are in the message itself
         assert image not in str(error.value)
 
 
 @pytest.mark.parametrize("container_type", CONTAINER_TYPES)
 @pytest.mark.parametrize("image", REGISTRY_IMAGES)
 def test_builder_accepts_registry_image(container_type, image):
+    # Docker gets URIs as-is too and fails to pull them, as before
     built = ContainerCommandBuilder(container_type).with_image(image)._image.value
     if container_type == "docker" or image.startswith(URI_SCHEMES):
         assert built == image
