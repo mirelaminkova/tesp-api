@@ -171,6 +171,20 @@ def test_log_copy_is_bounded(tmp_path):
     assert len(result.stdout) == STDIO_LOG_TAIL_BYTES
 
 
+def test_log_copy_is_ascii_text_only(tmp_path):
+    # Pulsar decodes job stdout/stderr as strict UTF-8; binary data or a tail that starts mid
+    # multi-byte character must not reach it. The file itself keeps the exact bytes.
+    out, err = tmp_path / "out", tmp_path / "err"
+    script = r"printf 'a\377\000b\303\251\n'; printf 'x\200y\n' >&2"
+    result = subprocess.run(_build(["sh", "-c", script], stdout=Just(str(out)), stderr=Just(str(err))),
+                            capture_output=True, timeout=10)
+
+    assert result.returncode == 0
+    assert out.read_bytes() == b"a\xff\x00b\xc3\xa9\n"
+    assert result.stdout == b"ab\n"
+    assert result.stderr == b"xy\n"
+
+
 @pytest.mark.parametrize("container_type", ["docker", "singularity"])
 def test_container_types_use_same_inner_command(tmp_path, container_type):
     out = tmp_path / "out"
