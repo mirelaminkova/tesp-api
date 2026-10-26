@@ -296,6 +296,17 @@ def test_invalid_env_name_rejected():
     assert resp.status_code == 400
     assert "executors[0].env" in resp.text
 
+# Images that are host paths (run by Singularity as the container root) are refused at task creation, naming the
+# field without echoing the value.
+@pytest.mark.parametrize("image", ["/", "/images/x.sif", "./rel", "instance://x"])
+def test_host_path_image_rejected(image):
+    task = {"executors": [{"image": image, "command": ["true"]}]}
+    resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
+    assert resp.status_code == 400
+    assert "executors[0].image" in resp.text
+    if image != "/":
+        assert image not in resp.text
+
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
     response = _test_simple("cancel.json", 60, "RUNNING")

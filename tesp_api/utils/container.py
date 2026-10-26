@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple, Optional, Union
 from pymonad.maybe import Nothing, Maybe, Just
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskOutput, TesTaskIOType, \
-    is_valid_env_name, is_valid_image, is_valid_mount_path
+    is_valid_env_name, is_valid_image, is_valid_mount_path, has_registry_scheme
 from tesp_api.utils.resource_values import positive, ram_mib
 from tesp_api.utils.functional import get_else_throw, maybe_of
 
@@ -63,14 +63,14 @@ class ContainerCommandBuilder:
         return self
 
     def with_image(self, image: str):
+        # Also checked at task creation; repeated for tasks stored before. The image is not echoed: it may be a
+        # host path.
         if not is_valid_image(image):
-            raise ValueError(f"invalid image name: {image!r}")
+            raise ValueError("invalid image: must be a Docker reference or a docker://, library://, shub:// or oras:// "
+                             "URI")
         if self.container_type == "singularity":
-            # If it's an absolute path, use as-is
-            if os.path.isabs(image):
-                self._image = Just(image)
-            # If it's already got a URI scheme, use as-is
-            elif image.startswith(("docker://", "library://", "shub://", "oras://")):
+            # Registry URIs are used as-is
+            if has_registry_scheme(image):
                 self._image = Just(image)
             # Otherwise, assume Docker Hub reference
             else:

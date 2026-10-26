@@ -284,9 +284,27 @@ def is_valid_env_name(name: str) -> bool:
     return ENV_NAME_PATTERN.fullmatch(name) is not None
 
 
+# Singularity pulls these from a remote registry. Other schemes (e.g. ``instance://``, ``oci-archive://``; matched
+# case-sensitively, so ``DOCKER://`` too) are refused.
+REGISTRY_IMAGE_SCHEMES = ("docker", "library", "shub", "oras")
+IMAGE_SCHEME_PATTERN = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://")
+
+
+def has_registry_scheme(image: str) -> bool:
+    scheme = IMAGE_SCHEME_PATTERN.match(image)
+    return scheme is not None and scheme.group(1) in REGISTRY_IMAGE_SCHEMES
+
+
 def is_valid_image(image: str) -> bool:
-    """An image starting with ``-`` would be parsed as an option of ``docker run``."""
-    return not image.startswith("-")
+    """
+    Accepts Docker references and ``docker://``, ``library://``, ``shub://`` and ``oras://`` URIs. Refuses images that
+    would make the container runtime use files on the host: absolute paths (Singularity runs a host directory or
+    ``.sif`` file as the container, as the Pulsar user), relative paths (starting with ``.``) and other URI schemes.
+    Also refuses empty images and images starting with ``-``, which would be parsed as an option of ``docker run``.
+    """
+    if not image or image.startswith(("-", "/", ".")):
+        return False
+    return IMAGE_SCHEME_PATTERN.match(image) is None or has_registry_scheme(image)
 
 
 def is_valid_mount_path(path: Union[str, Path]) -> bool:
@@ -296,9 +314,9 @@ def is_valid_mount_path(path: Union[str, Path]) -> bool:
 def find_invalid_container_fields(task: TesTask) -> List[str]:
     """
     Returns the fields (e.g. ``executors[0].env``) holding values that cannot be passed safely to the container
-    runtime: environment variable names not matching ``[A-Za-z_][A-Za-z0-9_]*``, images starting with ``-`` and
-    mounted paths containing ``:`` or ``,`` (input paths, volumes and the directories of output paths, which are
-    mounted as volumes). The values themselves are not returned.
+    runtime: environment variable names not matching ``[A-Za-z_][A-Za-z0-9_]*``, images refused by
+    ``is_valid_image`` and mounted paths containing ``:`` or ``,`` (input paths, volumes and the directories of output
+    paths, which are mounted as volumes). The values themselves are not returned.
     """
     invalid = []
     for i, executor in enumerate(task.executors):
