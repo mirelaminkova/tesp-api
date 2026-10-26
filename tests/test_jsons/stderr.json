@@ -1,0 +1,26 @@
+{
+  "inputs": [
+    {
+      "path": "/data/script.sh",
+      "content": "echo hello-world-stderr >&2\n",
+      "type": "FILE"
+    }
+  ],
+  "outputs": [
+    {
+      "path": "/outputs/stderr-test",
+      "url": "http://172.17.0.1:5000/upload",
+      "type": "FILE"
+    }
+  ],
+  "executors": [
+    {
+      "image": "ubuntu",
+      "command": [
+        "sh",
+        "/data/script.sh"
+      ],
+      "stderr": "/outputs/stderr-test"
+    }
+  ]
+}
