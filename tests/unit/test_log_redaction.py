@@ -86,11 +86,15 @@ def test_redacts_url_encoded_command_line():
     assert redacted.startswith("http://pulsar:8913/jobs/abc/submit?command_line=set+-xe")
 
 
-@pytest.mark.parametrize("text", [
+TOKENS_AND_POLICIES = [
     "X-Amz-Security-Token=FQoGZXIvYXdzE%2Fabc&X-Amz-Date=1",
     "x-amz-security-token%3DFQoGZXIvYXdzE%252Fabc%26x",
     "--form-string 'policy=eyJleHBpcmF0aW9uIjoi+/a==' -F",
-])
+    "+--form-string+%27policy%3DeyJleHBpcmF0aW9uIjoi%2B/a%3D%3D%27+-F",
+]
+
+
+@pytest.mark.parametrize("text", TOKENS_AND_POLICIES)
 def test_redacts_session_tokens_and_policies(text):
     _assert_clean(redact_presigned_urls(text))
 
@@ -154,7 +158,8 @@ def test_pulsar_error_messages_and_tracebacks_are_redacted(capsys):
     errors = []
 
     async def scenario(operations, received):
-        # A ClientResponseError (here ContentTypeError) names the request URL, query included.
+        # A ClientResponseError (here ContentTypeError) names the request URL, query included. No public operation
+        # sends command_line and expects JSON, so the request is made directly.
         try:
             await operations._pulsar_request(path="/jobs/abc/submit", method="POST", response_type="JSON",
                                              params={"command_line": command})
@@ -193,11 +198,12 @@ def _scan(tmp_path, text: str) -> subprocess.CompletedProcess:
 
 
 @pytest.mark.parametrize("leak", [
-    lambda command: command,
-    lambda command: str(URL("http://pulsar:8913/jobs/abc/submit").with_query({"command_line": command})),
-])
+    _command_line(),
+    str(URL("http://pulsar:8913/jobs/abc/submit").with_query({"command_line": _command_line()})),
+    *TOKENS_AND_POLICIES,
+], ids=["raw", "url-encoded", "token", "encoded-token", "policy", "encoded-policy"])
 def test_log_scan_fails_on_presigned_urls_without_printing_them(tmp_path, leak):
-    result = _scan(tmp_path, f"tesp-api-1  | DEBUG {leak(_command_line())}\n")
+    result = _scan(tmp_path, f"tesp-api-1  | DEBUG {leak}\n")
     assert result.returncode == 1, result.stderr
     assert "line 1" in result.stdout + result.stderr
     _assert_clean(result.stdout + result.stderr)
@@ -206,8 +212,8 @@ def test_log_scan_fails_on_presigned_urls_without_printing_them(tmp_path, leak):
 def test_log_scan_passes_redacted_logs(tmp_path):
     command = _command_line()
     url = URL("http://pulsar:8913/jobs/abc/submit").with_query({"command_line": command})
-    result = _scan(tmp_path, f"tesp-api-1  | {redact_presigned_urls(command)}\n"
-                             f"tesp-api-1  | {redact_presigned_urls(str(url))}\n")
+    logged = [command, str(url), *TOKENS_AND_POLICIES]
+    result = _scan(tmp_path, "".join(f"tesp-api-1  | {redact_presigned_urls(text)}\n" for text in logged))
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -215,3 +221,12 @@ def test_log_scan_reports_missing_files(tmp_path):
     result = subprocess.run(["bash", SCAN_LOGS, str(tmp_path / "missing.log")], capture_output=True, text=True,
                             timeout=30)
     assert result.returncode == 2
+
+
+def test_log_scan_reports_leaks_after_an_unreadable_file(tmp_path):
+    log = tmp_path / "compose.log"
+    log.write_text(f"tesp-api-1  | {_command_line()}\n")
+    result = subprocess.run(["bash", SCAN_LOGS, str(tmp_path / "missing.log"), str(log)], capture_output=True,
+                            text=True, timeout=30)
+    assert result.returncode == 2
+    assert f"{log} line 1: tesp-api-1" in result.stderr

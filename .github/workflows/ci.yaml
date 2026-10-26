@@ -132,11 +132,14 @@ jobs:
           if [ -f upload_server.log ]; then logs+=(upload_server.log); fi
           bash ci/scan-logs.sh "${logs[@]}"
 
+      - name: show containers on failure
+        if: failure() || cancelled()
+        run: docker compose --profile pulsar ps -a
+
       - name: dump logs on failure
         # Only logs the scan passed are printed.
         if: (failure() || cancelled()) && steps.scan.outcome == 'success'
         run: |
-          docker compose --profile pulsar ps -a
           cat "$RUNNER_TEMP/compose.log"
           cat upload_server.log || true
 

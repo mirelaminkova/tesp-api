@@ -19,12 +19,15 @@ MAX_PRESIGN_EXPIRY_SECONDS = 7 * 24 * 3600  # SigV4 limit
 
 # Query parameters of presigned URLs and form fields of presigned POSTs (lower case), e.g. `x-amz-signature=...`.
 # The POST policy is redacted too: it contains the x-amz-credential condition, i.e. the access key id.
-# The second form is the same text URL-encoded once, as aiohttp sends the job command line to Pulsar
-# (`command_line=...X-Amz-Signature%3D...%26...`); there `+` is an encoded space, so it ends the value.
 _SECRET_NAME = r'(?i:X-Amz-(?:Credential|Signature|Security-Token)|policy)'
-_PRESIGNED_SECRET_PARAMS = re.compile(
-    rf'(?<![\w-]){_SECRET_NAME}=[^&\s\'"]+'
-    rf'|(?:(?<![\w-])|(?<=%[0-9A-Fa-f]{{2}})){_SECRET_NAME}%3[Dd](?:(?!%2[0267])[^&\s\'"+])+')
+_PRESIGNED_SECRET_PARAMS = re.compile(rf'''
+    # Raw: the value ends at `&`, white space or a quote.
+    (?<![\w-]){_SECRET_NAME}=[^&\s'"]+
+    # URL-encoded once, as aiohttp sends the job command line to Pulsar (`command_line=...%26X-Amz-Signature%3D...`).
+    # The name may follow an encoded character (`%26`, `%27`); the value also ends at `+` (an encoded space) and at
+    # an encoded space, `"`, `&` or `'` (`%20`, `%22`, `%26`, `%27`). Base64 `+`, `/`, `=` are `%2B`, `/`, `%3D`.
+    | (?:(?<![\w-])|(?<=%[0-9A-Fa-f]{{2}})){_SECRET_NAME}%3[Dd](?:(?!%2[0267])[^&\s'"+])+
+''', re.VERBOSE)
 
 
 @dataclass(frozen=True)
