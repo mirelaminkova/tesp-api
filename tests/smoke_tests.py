@@ -382,7 +382,8 @@ def _assert_no_s3_secrets_stored(task_id):
     stored = json.dumps(_get_request(f"/v1/tasks/{task_id}?view=FULL"))
     for leaked in (S3_TEST_SECRET_KEY, "X-Amz-Signature", "X-Amz-Credential", "x-amz-signature",
                    "x-amz-credential"):
-        assert leaked not in stored
+        # A plain `assert leaked not in stored` would print the stored task, secrets included, into the public CI log.
+        assert leaked not in stored, f"{leaked!r} stored with task {task_id}"
 
 # Downloads a plain s3://bucket/key input using the server-side S3 settings.
 def test_s3_input():

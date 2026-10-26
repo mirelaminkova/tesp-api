@@ -1,14 +1,9 @@
 import aiohttp
-from loguru import logger
 from socket import AF_INET
 
 from tesp_api.config.properties import properties
-from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarOperations, PulsarAmqpOperations
-
-
-# aiohttp tracing feature allows to log each request
-async def on_request_start(session, context, params):
-    logger.debug(f'Sending request to pulsar <{params}>')
+from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarOperations, PulsarAmqpOperations, \
+    log_pulsar_request
 
 
 class PulsarService:
@@ -17,7 +12,7 @@ class PulsarService:
         timeout = aiohttp.ClientTimeout(total=properties.pulsar.client_timeout)
         connector = aiohttp.TCPConnector(family=AF_INET, limit_per_host=100)
         trace_config = aiohttp.TraceConfig()
-        trace_config.on_request_start.append(on_request_start)
+        trace_config.on_request_start.append(log_pulsar_request)
         self.pulsar_client = aiohttp.ClientSession(timeout=timeout, connector=connector, trace_configs=[trace_config])
 
     def get_operations(self) -> PulsarOperations:
