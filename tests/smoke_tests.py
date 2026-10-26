@@ -330,6 +330,11 @@ def test_resource_check_with_limits():
 
     print(f"Requested resources: CPU cores = {cpu_cores}, RAM = {ram_gb} GB (Limits: {max_cpu_cores} cores, {max_ram_gb} GB RAM)")
 
+# A task with resources.cpu_cores and ram_gb (sent by every Nextflow task) completes with the default
+# container.resource_limits, also under singularity where apptainer cannot apply the limits (issue #38).
+def test_task_with_resources_completes():
+    assert _test_simple("resources.json", 120)
+
 # Remove uploaded_data directory
 @pytest.fixture(scope="session", autouse=True)
 def cleanup_uploaded_data():
