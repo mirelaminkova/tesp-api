@@ -174,6 +174,7 @@ def test_log_copy_is_bounded(tmp_path):
 def test_log_copy_is_ascii_text_only(tmp_path):
     # Pulsar decodes job stdout/stderr as strict UTF-8; binary data or a tail that starts mid
     # multi-byte character must not reach it. The file itself keeps the exact bytes.
+    # Calls subprocess directly to compare raw bytes rather than decoded text.
     out, err = tmp_path / "out", tmp_path / "err"
     script = r"printf 'a\377\000b\303\251\n'; printf 'x\200y\n' >&2"
     result = subprocess.run(_build(["sh", "-c", script], stdout=Just(str(out)), stderr=Just(str(err))),
