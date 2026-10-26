@@ -197,6 +197,30 @@ managers ignore it; the HTCondor manager would write it into the submit file as 
 command, so leave the templates empty there.
 
 &nbsp;
+### Waiting for Pulsar jobs
+`TESP API` requests the status of each submitted job from Pulsar until the job is complete, however long it queues or
+runs (in a batch system, a task may wait for resources for hours). The wait between requests grows on long jobs so they
+do not load Pulsar.
+
+| Setting | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `pulsar.status.poll_interval` | `TESP_API_PULSAR__STATUS__POLL_INTERVAL` | `4` | Seconds from submission to the first status request; each later wait is 1.25 times longer |
+| `pulsar.status.max_poll_interval` | `TESP_API_PULSAR__STATUS__MAX_POLL_INTERVAL` | `60` | Longest wait between status requests, in seconds (when unset and `poll_interval` is larger: `poll_interval`) |
+| `pulsar.status.max_wait_seconds` | `TESP_API_PULSAR__STATUS__MAX_WAIT_SECONDS` | `0` | Longest a job may queue and run, in seconds; `0` means no limit. Past it `TESP API` asks Pulsar to cancel the job and the task ends in `SYSTEM_ERROR` with the reason in its system logs |
+| `pulsar.status.error_retry_seconds` | `TESP_API_PULSAR__STATUS__ERROR_RETRY_SECONDS` | `600` | How long connection errors, timeouts and 5xx/429 answers from Pulsar are retried before the task ends in `SYSTEM_ERROR`; a good answer starts the count again. `0` disables retries |
+
+A job that never finishes in Pulsar (e.g. a batch job pending on resources the cluster cannot provide) keeps its task
+`RUNNING` until it is canceled, unless `max_wait_seconds` is set. Other answers from Pulsar (4xx, a malformed status)
+end the task in `SYSTEM_ERROR` at once.
+
+`pulsar.status.max_polls` is deprecated and ignored (it used to fail every task still running after
+`max_polls` × `poll_interval`, about 27 minutes by default); `TESP API` logs a warning at startup when it is set.
+
+Canceling a task (`POST /v1/tasks/{id}:cancel`) is noticed at the next status request, which then stops and cancels
+the Pulsar job, so it can take up to `max_poll_interval` seconds. Tasks with S3 outputs must also finish within
+`s3.output_presign_expiry_seconds`, see below.
+
+&nbsp;
 ### S3 inputs and outputs
 Inputs and outputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
 TES executor with an S3 work dir). The S3 endpoint and credentials are configured on the server, never in the URL:
@@ -392,7 +416,8 @@ longer configured to redirect stdout into the file.
 |----------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | _Pulsar_ | `TESP API` should be able to dispatch executions to multiple `Pulsar` services via different types of `Pulsar` interfaces. Currently, only one `Pulsar` service is supported       |
 | _Pulsar_ | `Pulsar` must be "polled" for job state. Preferably `Pulsar` should notify `TESP API` about state change. This is already default behavior when using `Pulsar` with message queues |
-| _TES_    | Canceling a `TES` task calls Pulsar's cancel endpoint but container termination depends on Pulsar/runtime behavior. In-flight tasks may still complete.                             |
+| _TES_    | Canceling a `TES` task calls Pulsar's cancel endpoint at the next status request (see [Waiting for Pulsar jobs](#waiting-for-pulsar-jobs)) but container termination depends on Pulsar/runtime behavior. In-flight tasks may still complete. |
+| _TES_    | Waiting for Pulsar jobs happens in the `TESP API` process and is not resumed when it starts again. Tasks that are queued, initializing or running when it stops or restarts never get their logs or final state: currently, after a clean shutdown they show `CANCELED` (the shutdown handler fails before it cancels their Pulsar jobs), after a crash they keep their state, and in both cases their Pulsar jobs go on. |
 | _TES_    | Only `cpu_cores` and `ram_gb` are used, as container runtime flags and/or a batch-system native specification (see [Task resources](#task-resources-cpu-and-memory)); with the default settings they are not enforced for `singularity`. Other resource fields (disk, preemptible, zones) are stored but not enforced. |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |

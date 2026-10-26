@@ -2,6 +2,7 @@ import aiohttp
 from socket import AF_INET
 
 from tesp_api.config.properties import properties
+from tesp_api.service.job_polling import get_status_polling
 from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarOperations, PulsarAmqpOperations, \
     log_pulsar_request
 
@@ -21,15 +22,9 @@ class PulsarService:
                 amqp_url=properties.pulsar.amqp_url,
                 pulsar_client=self.pulsar_client,
                 base_url=properties.pulsar.url,
-                status_poll_interval=properties.pulsar.status.poll_interval,
-                status_max_polls=properties.pulsar.status.max_polls
+                status_polling=get_status_polling()
             )
-        return PulsarRestOperations(
-            self.pulsar_client,
-            properties.pulsar.url,
-            properties.pulsar.status.poll_interval,
-            properties.pulsar.status.max_polls
-        )
+        return PulsarRestOperations(self.pulsar_client, properties.pulsar.url, get_status_polling())
 
 
 pulsar_service = PulsarService()
