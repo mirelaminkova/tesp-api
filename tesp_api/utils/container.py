@@ -380,10 +380,14 @@ def _curl_quoted(value: str) -> str:
 
 
 # In the directory loop below: $f is ./<relative path>, $r the relative path, $q the relative path escaped for
-# curl -F (see _curl_quoted).
+# curl -F (see _curl_quoted). The "_" keeps a trailing newline of a file name from being stripped by $(...).
 _DIRECTORY_LOOP = (
-    'for f; do r=${f#./}; q=$(printf "%s" "$r" | sed \'s/[\\\\"]/\\\\&/g\'); {upload} || exit 1; done'
+    'for f; do r=${f#./}; q=$(printf "%s_" "$r" | sed \'s/[\\\\"]/\\\\&/g\'); q=${q%_}; '
+    '{upload} || exit 1; done'
 )
+# Files per upload loop. BusyBox find -exec ... + can build an argument list that is too long and then silently skips
+# files, so the batches are bounded with xargs.
+_DIRECTORY_BATCH = 100
 
 
 def _file_upload(conf: dict, path: str) -> str:
@@ -405,9 +409,14 @@ def _directory_upload(conf: dict, path: str) -> str:
         # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
         upload = f"curl -fsS -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
     loop = _DIRECTORY_LOOP.replace("{upload}", upload)
-    # -L uploads the targets of symbolic links, as for FILE outputs. find exits non-zero, failing the stage-out, if an
-    # upload fails, an entry is unreadable or symbolic links form a loop.
-    return f"( cd {shlex.quote(path)} && find -L . -type f -exec sh -c {shlex.quote(loop)} sh {{}} + )"
+    # Symbolic links are not followed: they could point outside the directory, or form loops. A failing find (e.g. an
+    # unreadable directory) is recorded in $m, as its status is lost in the pipe; xargs fails if an upload fails.
+    return (
+        f"( cd {shlex.quote(path)} && m=$(mktemp) && "
+        f"{{ find . -type f -print0 || echo failed > \"$m\"; }} | "
+        f"xargs -0 -n {_DIRECTORY_BATCH} sh -c {shlex.quote(loop)} sh; "
+        f"s=$?; if [ -s \"$m\" ]; then s=1; fi; rm -f \"$m\"; exit $s )"
+    )
 
 
 def stage_out_script(output_confs: List[dict]) -> str:

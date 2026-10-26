@@ -76,6 +76,7 @@ class TesTaskOutput(BaseModel):
                                          ' - file:///path/to/my/file')
 
     path: str = Field(..., description="Path of the file inside the container. Must be an absolute path.")
+    path_prefix: str = Field(None, description="TES 1.1, for paths with wildcards, which are not supported.")
     type: TesTaskIOType
 
 
@@ -252,5 +253,22 @@ def find_unsupported_s3_urls(task: TesTask) -> List[str]:
         for field, items in (("inputs", task.inputs), ("outputs", task.outputs))
         for i, item in enumerate(items or [])
         if isinstance(item.url, S3Url) and (
-            not item.url.is_plain() or (field == "inputs" and item.type == TesTaskIOType.DIRECTORY))
+            not item.url.is_plain()
+            or (field == "inputs" and item.type == TesTaskIOType.DIRECTORY)
+            # A presigned POST replaces ${filename} in the key (see presign_post_policy).
+            or (field == "outputs" and item.type == TesTaskIOType.DIRECTORY and "${filename}" in item.url.key))
     ]
+
+
+def find_unsupported_outputs(task: TesTask) -> List[str]:
+    """
+    Returns the fields of outputs that cannot be uploaded: paths that are not absolute or contain wildcards (TES 1.1
+    ``path_prefix`` outputs, not supported yet). Without this check such an output would be skipped as missing.
+    """
+    problems = []
+    for i, output in enumerate(task.outputs or []):
+        if not output.path.startswith("/") or any(c in output.path for c in "*?["):
+            problems.append(f"outputs[{i}].path")
+        elif output.path_prefix is not None:
+            problems.append(f"outputs[{i}].path_prefix")
+    return problems

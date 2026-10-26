@@ -12,7 +12,7 @@ from tesp_api.api.error import api_handle_error, get_error_response_model, get_r
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog, \
-    find_unsupported_s3_urls
+    find_unsupported_s3_urls, find_unsupported_outputs
 from tesp_api.utils.functional import maybe_of, identity_with_side_effect
 from tesp_api.api.model.task_service_info import TesServiceInfo, TesServiceType, TesServiceOrganization
 from tesp_api.api.model.response_models import \
@@ -51,6 +51,12 @@ async def create_task(
                     f"inputs are not supported yet). "
                     f"Credentials, host and port in S3 URLs are not accepted; the S3 endpoint and "
                     f"credentials are configured on the server."))
+    unsupported_outputs = find_unsupported_outputs(tes_task)
+    if unsupported_outputs:
+        return get_response_for_error_model(get_error_response_model(
+            HTTPStatus.BAD_REQUEST,
+            message=f"Unsupported output in {', '.join(unsupported_outputs)}: output paths must be absolute; "
+                    f"wildcards (*, ?, [) and path_prefix are not supported."))
     task_to_create = RegisteredTesTask(
         **tes_task.dict(),
         state=TesTaskState.QUEUED,

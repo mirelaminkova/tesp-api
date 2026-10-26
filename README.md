@@ -209,8 +209,11 @@ Limitations:
   such a task still has to run, its stage-in fails.
 - Keys are used literally, without percent-decoding. URLs with a query (e.g. `?versionId=`) or fragment are refused.
 - S3 `DIRECTORY` inputs are not supported yet and are refused with `400 Bad Request`.
-- Output paths with wildcards (TES 1.1 `path_prefix`) are not supported.
-- A `DIRECTORY` output needs a key prefix: `s3://bucket` and `s3://bucket/` are refused with `400 Bad Request`.
+- A `DIRECTORY` output needs a key prefix: `s3://bucket` and `s3://bucket/` are refused with `400 Bad Request`, as are
+  `DIRECTORY` output keys containing `${filename}` (S3 POST uploads substitute it).
+- Each output file is uploaded in a single request, so AWS S3 limits it to 5 GB.
+- Any submitter can write to any key the server's credentials can write; there is no per-user bucket or prefix
+  restriction.
 - The upload URLs are created when the task starts running. A task that runs longer than
   `s3.output_presign_expiry_seconds` fails to upload its S3 outputs.
 - The endpoint must be reachable from the Pulsar staging containers. For HTTPS endpoints with a private CA, the
@@ -345,7 +348,8 @@ longer configured to redirect stdout into the file.
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
 | _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's stderr) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
 | _TES_    | Outputs are uploaded to `s3://` URLs and to HTTP(S) upload endpoints (multipart `POST`, form field `file`). Other URLs, such as the `ftp://` output in the example above, get the same `curl` multipart `POST`, which is not an FTP upload, so FTP outputs do not work. |
-| _TES_    | `DIRECTORY` outputs upload every file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). |
+| _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded. |
+| _TES_    | Output paths must be absolute. Wildcards (`*`, `?`, `[`) and `path_prefix` (TES 1.1) are not supported and are refused with `400 Bad Request`. |
 | _TES_    | When an executor sets `stdin`, `stdout` or `stderr`, its image must provide `sh`. `logs.logs.stdout`/`stderr` then hold the last 64 KiB of each redirected stream, filtered to printable ASCII, so non-ASCII text is dropped from the log (the file keeps the exact bytes); without `tail`/`tr` in the image the log copy is empty. |
 
 &nbsp;

@@ -466,3 +466,16 @@ def test_directory_output_does_not_follow_symbolic_links(fake_curl, tmp_path):
     result, calls = fake_curl([_output_conf(UPLOAD_URL, str(results), TesTaskIOType.DIRECTORY)])
     assert result.returncode == 0, result.stderr
     assert [list(call["files"].values()) for call in calls] == [["real\n"]]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read any directory")
+def test_unreadable_directory_fails_the_stage_out(fake_curl, tmp_path):
+    results = tmp_path / "locked"
+    (results / "sub").mkdir(parents=True)
+    (results / "ok.txt").write_text("ok\n")
+    (results / "sub").chmod(0)
+    try:
+        result, _ = fake_curl([_output_conf(UPLOAD_URL, str(results), TesTaskIOType.DIRECTORY)])
+    finally:
+        (results / "sub").chmod(0o755)
+    assert result.returncode != 0

@@ -18,7 +18,9 @@ ADDRESSING_STYLES = {'path', 'virtual', 'auto'}
 MAX_PRESIGN_EXPIRY_SECONDS = 7 * 24 * 3600  # SigV4 limit
 
 # Query parameters of presigned URLs and form fields of presigned POSTs (lower case), e.g. `x-amz-signature=...`.
-_PRESIGNED_SECRET_PARAMS = re.compile(r'((?i:X-Amz-(?:Credential|Signature|Security-Token))=)[^&\s\'"]+')
+# The POST policy is redacted too: it contains the x-amz-credential condition, i.e. the access key id.
+_PRESIGNED_SECRET_PARAMS = re.compile(
+    r'((?i:X-Amz-(?:Credential|Signature|Security-Token)|policy)=)[^&\s\'"]+')
 
 
 @dataclass(frozen=True)
