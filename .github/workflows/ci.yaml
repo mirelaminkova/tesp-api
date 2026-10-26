@@ -2,7 +2,8 @@ name: ci
 
 # Fork CI: needs no repository secrets. Publishing images is release work and
 # stays manual. Job names (lint, types, unit, integration) are stable so branch
-# protection can require them; conformance is deliberately not required yet.
+# protection can require them; conformance and nextflow-e2e are deliberately
+# not required yet (nextflow-e2e: until it passes reliably, issue #7).
 
 on:
   pull_request:
@@ -213,14 +214,21 @@ jobs:
     timeout-minutes: 45
     env:
       NXF_VER: "25.10.8"
-      # sha256 of nextflow-${NXF_VER}-dist from the GitHub release.
+      # sha256 of nextflow-${NXF_VER}-dist from the GitHub release; bump together with NXF_VER.
+      # The nf-ga4gh plugin version is pinned in tests/e2e/nextflow/nextflow.config.
       NXF_DIST_SHA256: "6ee8ab223c92a15870f12fb3685f0b43d1fc1913d806c2bb75571dd7e6cdb449"
       S3_ENDPOINT: http://172.17.0.1:9000
       # Test credentials of the compose MinIO service, not secrets.
       AWS_ACCESS_KEY_ID: tesp-test
       AWS_SECRET_ACCESS_KEY: tesp-test-secret
-      AWS_DEFAULT_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1  # for the aws CLI; MinIO ignores it
     steps:
+      - name: set paths
+        # Outside the checkout: compose bind-mounts it into the auto-reloading tesp-api container.
+        run: |
+          echo "E2E_DIR=$RUNNER_TEMP/nextflow-e2e" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/nextflow-e2e/bin" "$RUNNER_TEMP/nextflow-e2e/logs"
+
       - name: check out repository
         uses: actions/checkout@v7
         with:
@@ -237,10 +245,6 @@ jobs:
 
       - name: install Nextflow
         run: |
-          # Outside the checkout: compose bind-mounts it into the auto-reloading tesp-api container.
-          echo "E2E_DIR=$RUNNER_TEMP/nextflow-e2e" >> "$GITHUB_ENV"
-          E2E_DIR="$RUNNER_TEMP/nextflow-e2e"
-          mkdir -p "$E2E_DIR/bin" "$E2E_DIR/logs"
           curl -fsSL -o "$E2E_DIR/bin/nextflow" \
             "https://github.com/nextflow-io/nextflow/releases/download/v${NXF_VER}/nextflow-${NXF_VER}-dist"
           echo "$NXF_DIST_SHA256  $E2E_DIR/bin/nextflow" | sha256sum -c -
@@ -273,6 +277,7 @@ jobs:
           exit 1
 
       - name: create bucket
+        # The aws CLI comes with the ubuntu-latest runner image.
         run: |
           for _ in $(seq 1 30); do
             if curl -fsS -o /dev/null "$S3_ENDPOINT/minio/health/ready"; then
@@ -287,11 +292,11 @@ jobs:
       - name: run pipeline
         timeout-minutes: 20
         env:
-          NXF_HOME: ${{ runner.temp }}/nextflow-e2e/home
           NXF_ANSI_LOG: "false"
           NXF_E2E_WORK_DIR: s3://nextflow-e2e/work
         run: |
           cd "$E2E_DIR"
+          export NXF_HOME="$E2E_DIR/home"
           nextflow -log "$E2E_DIR/logs/nextflow.log" run "$GITHUB_WORKSPACE/tests/e2e/nextflow/main.nf" \
             -c "$GITHUB_WORKSPACE/tests/e2e/nextflow/nextflow.config" \
             --outdir "$E2E_DIR/results"
@@ -305,23 +310,35 @@ jobs:
             exit 1
           fi
           echo "shout.txt: $actual"
+          # Both processes must have gone through tesp-api, not run anywhere else.
+          complete="$(curl -fsS "http://localhost:8080/v1/tasks?view=MINIMAL" | jq '[.tasks[] | select(.state == "COMPLETE")] | length')"
+          if [ "$complete" -lt 2 ]; then
+            echo "::error title=Nextflow e2e::tesp-api has $complete COMPLETE tasks, expected at least 2"
+            exit 1
+          fi
+          echo "tesp-api COMPLETE tasks: $complete"
 
       # Runs on success too: a leak is a failure even when the pipeline passes.
+      # Covers the files uploaded below, not the step output above.
       - name: collect and scan logs
         id: logs
         if: always()
         run: |
-          E2E_DIR="${E2E_DIR:-$RUNNER_TEMP/nextflow-e2e}"  # unset if an early step failed
-          mkdir -p "$E2E_DIR/logs"
           cd "$E2E_DIR/logs"
           docker compose --project-directory "$GITHUB_WORKSPACE" --profile pulsar logs --no-color > compose.log 2>&1 || true
           # The TES view of every task Nextflow submitted (stored s3:// URLs, states, executor logs).
           curl -fsS "http://localhost:8080/v1/tasks?view=FULL" > tasks.json 2>&1 || true
-          # Never upload credentials or presigned URLs: fail instead and say where they are.
-          pattern='X-Amz-Signature|X-Amz-Credential|AWSAccessKeyId|tesp-test-secret'
-          if grep -EIlr "$pattern" .; then
+          # Never upload credentials or presigned URLs: fail instead and name the files.
+          # -a: Docker logs may hold binary bytes, which -I or the default would skip.
+          pattern='x-amz-signature|x-amz-credential|x-amz-security-token|awsaccesskeyid|tesp-test-secret'
+          status=0
+          LC_ALL=C grep -aEilr "$pattern" . || status=$?
+          if [ "$status" -eq 0 ]; then
             echo "::error title=Nextflow e2e::Logs contain credentials or presigned URLs (files above); not uploading them."
             echo "clean=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          elif [ "$status" -ge 2 ]; then
+            echo "::error title=Nextflow e2e::Log scan failed; not uploading the logs."
             exit 1
           fi
           echo "clean=true" >> "$GITHUB_OUTPUT"
