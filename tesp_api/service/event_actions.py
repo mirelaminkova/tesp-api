@@ -302,7 +302,8 @@ async def handle_run_task(event: Event) -> None:
         logger.info(f"Task {task_id} Pulsar job cleanup attempted after asyncio cancellation.")
 
     except Exception as error:
-        logger.error(f"Exception in handle_run_task for task {task_id}: {type(error).__name__} - {error}")
+        logger.error(f"Exception in handle_run_task for task {task_id}: {type(error).__name__} - "
+                     f"{redact_presigned_urls(str(error))}")
 
         task_state_after_error_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
         if task_state_after_error_monad.is_just() and task_state_after_error_monad.value.state == TesTaskState.CANCELED:

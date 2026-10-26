@@ -9,9 +9,11 @@ from urllib.parse import quote
 from pymonad.maybe import Maybe, Nothing
 from bson.objectid import ObjectId
 from pymonad.promise import Promise
-from aiohttp import ClientSession, ClientError
+from aiohttp import ClientSession, ClientError, TraceRequestStartParams
+from loguru import logger
 
 from tesp_api.repository.model.task import TesTaskIOType
+from tesp_api.service.client.client_s3 import redact_presigned_urls
 
 
 # Pulsar returns job_stdout/job_stderr untruncated; keep the tail so task documents stay small
@@ -32,6 +34,18 @@ def job_streams(status: dict) -> Tuple[str, str]:
     return tail('job_stdout', 'stdout'), tail('job_stderr', 'stderr')
 
 
+# aiohttp tracing feature allows to log each request
+async def log_pulsar_request(session, context, params: TraceRequestStartParams):
+    # Method and path only: the query of /jobs/{id}/submit is the whole job command line, presigned S3 URLs included.
+    logger.debug(f'Sending request to pulsar <{params.method} {params.url.with_query(None)}>')
+
+
+def _error_message(error: Exception) -> str:
+    # aiohttp's ClientResponseError names the request URL, and that may hold the job command line. The type is named
+    # because the wrapped error is hidden from tracebacks, and some (asyncio.TimeoutError) have no message.
+    return f'{type(error).__name__}: {redact_presigned_urls(str(error))}'
+
+
 class DataType(str, Enum):
     INPUT = "input",
     OUTPUT = "output"
@@ -39,8 +53,10 @@ class DataType(str, Enum):
 
 class PulsarLayerConnectionError(Exception):
     def __init__(self, error: Exception):
-        self.message = f'Pulsar connection error occurred [msg: {str(error)}]'
+        self.message = f'Pulsar connection error occurred [msg: {_error_message(error)}]'
         super().__init__(self.message)
+        # Logged tracebacks would print the unredacted wrapped error as the context ("During handling of...").
+        self.__suppress_context__ = True
 
     def __repr__(self):
         return f'PulsarLayerConnectionError [message: {self.message}]'
@@ -48,8 +64,10 @@ class PulsarLayerConnectionError(Exception):
 
 class PulsarOperationsError(Exception):
     def __init__(self, error: Exception):
-        self.message = f'Pulsar operations error occurred [msg: {str(error)}]'
+        self.message = f'Pulsar operations error occurred [msg: {_error_message(error)}]'
         super().__init__(self.message)
+        # Logged tracebacks would print the unredacted wrapped error as the context ("During handling of...").
+        self.__suppress_context__ = True
 
     def __repr__(self):
         return f'PulsarOperationsError [message: {self.message}]'
