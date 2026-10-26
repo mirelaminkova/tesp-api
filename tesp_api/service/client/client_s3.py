@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Optional
+from typing import List, Optional
 from urllib.parse import urlsplit
 
 import botocore.session
@@ -11,6 +11,7 @@ from botocore.config import Config
 
 from tesp_api.config.properties import properties
 from tesp_api.service.client.client import Client
+from tesp_api.repository.model.task import TesTaskIOType
 from tesp_api.utils.types import S3Url
 
 ADDRESSING_STYLES = {'path', 'virtual', 'auto'}
@@ -26,7 +27,7 @@ class S3Config:
     Without an access key the server uses anonymous (unsigned) requests, which only work for public buckets.
     """
     endpoint_url: Optional[str] = None
-    region: Optional[str] = None
+    region: str = 'us-east-1'
     access_key_id: Optional[str] = None
     secret_access_key: Optional[str] = field(default=None, repr=False)
     addressing_style: str = 'path'
@@ -59,11 +60,17 @@ def load_s3_config(props=None) -> S3Config:
 
     return S3Config(
         endpoint_url=setting('endpoint_url'),
-        region=setting('region'),
+        region=setting('region') or 'us-east-1',
         access_key_id=setting('access_key_id'),
         secret_access_key=setting('secret_access_key'),
         addressing_style=setting('addressing_style') or 'path',
         presign_expiry_seconds=int(setting('presign_expiry_seconds') or 3600))
+
+
+@lru_cache(maxsize=1)
+def get_s3_config() -> S3Config:
+    """The server's S3 settings, read once."""
+    return load_s3_config()
 
 
 def _client_args(config: S3Config) -> dict:
@@ -95,15 +102,31 @@ def presign_get_url(s3_url: S3Url, config: Optional[S3Config] = None) -> str:
     server, never the secret key. Presigning is local, no request is made to S3.
     """
     _require_plain(s3_url)
-    config = config or load_s3_config()
+    config = config or get_s3_config()
     return _presign_client(config).generate_presigned_url(
         'get_object',
         Params={'Bucket': s3_url.bucket, 'Key': s3_url.key},
         ExpiresIn=config.presign_expiry_seconds)
 
 
+def presign_s3_inputs(input_confs: List[dict], config: Optional[S3Config] = None) -> List[dict]:
+    """
+    Returns a copy of the stage-in ``input_confs`` in which S3 URLs are replaced by presigned URLs; those confs are
+    marked with ``'presigned': True``.
+    """
+    staged = []
+    for conf in input_confs:
+        url = conf.get('url')
+        if isinstance(url, S3Url):
+            if conf.get('type') == TesTaskIOType.DIRECTORY:
+                raise ValueError('S3 directory inputs are not supported')
+            conf = {**conf, 'url': presign_get_url(url, config), 'presigned': True}
+        staged.append(conf)
+    return staged
+
+
 def redact_presigned_urls(text: str) -> str:
-    """Hides the access key id and signature of presigned URLs in ``text`` (for logging)."""
+    """Hides the access key id, signature and session token of presigned URLs in ``text`` (for logging)."""
     return _PRESIGNED_SECRET_PARAMS.sub(r'\1REDACTED', text)
 
 
@@ -113,12 +136,12 @@ class ClientS3(Client):
     @staticmethod
     async def download_file(s3_url: S3Url):
         _require_plain(s3_url)
-        async with get_session().create_client('s3', **_client_args(load_s3_config())) as client:
+        async with get_session().create_client('s3', **_client_args(get_s3_config())) as client:
             async with (await client.get_object(Bucket=s3_url.bucket, Key=s3_url.key))['Body'] as stream:
                 return await stream.read()
 
     @staticmethod
     async def upload_file(s3_url: S3Url, file_content: bytes):
         _require_plain(s3_url)
-        async with get_session().create_client('s3', **_client_args(load_s3_config())) as client:
+        async with get_session().create_client('s3', **_client_args(get_s3_config())) as client:
             await client.put_object(Bucket=s3_url.bucket, Key=s3_url.key, Body=file_content)

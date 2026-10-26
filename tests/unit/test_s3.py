@@ -1,5 +1,6 @@
 """Unit tests for plain ``s3://bucket/key`` inputs with server-side S3 settings (issue #3)."""
-import sys
+import os
+import subprocess
 
 import pydantic
 import pytest
@@ -8,13 +9,12 @@ from urllib.parse import parse_qs, urlsplit
 from tesp_api.config.properties import get_properties
 from tesp_api.repository.model.task import TesTask, TesTaskIOType, find_unsupported_s3_urls
 from tesp_api.repository.model.task import TesTaskExecutor
-from tesp_api.service.client.client_s3 import S3Config, load_s3_config, presign_get_url, redact_presigned_urls
-from tesp_api.utils.container import stage_in_command
+from tesp_api.service.client.client_s3 import S3Config, load_s3_config, presign_get_url, presign_s3_inputs, \
+    redact_presigned_urls
+from tesp_api.utils.container import stage_in_command, untraced
 from tesp_api.utils.types import S3Url
 
-# tesp_api.service.client exports an instance named client_s3, which hides the module.
-client_s3 = sys.modules[S3Config.__module__]
-
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ACCESS_KEY = "AKIATESTACCESSKEY"
 SECRET_KEY = "test-secret-key-must-not-leak"
 
@@ -67,6 +67,12 @@ def _task(input_url=None, output_url=None) -> TesTask:
     )
 
 
+def test_s3_directory_input_is_reported():
+    task = TesTask(executors=[{"image": "alpine", "command": ["true"]}],
+                   inputs=[{"path": "/data/dir", "url": "s3://bucket/dir/", "type": "DIRECTORY"}])
+    assert find_unsupported_s3_urls(task) == ["inputs[0].url"]
+
+
 def test_plain_s3_task_has_no_unsupported_urls():
     assert find_unsupported_s3_urls(_task("s3://bucket/in.txt", "s3://bucket/out.txt")) == []
 
@@ -84,7 +90,18 @@ def test_non_s3_urls_are_ignored():
 
 # --- settings ----------------------------------------------------------------
 
-def test_settings_are_read_from_environment(monkeypatch):
+@pytest.fixture
+def clean_settings(monkeypatch):
+    """Settings from the repository's settings.toml only, whatever the developer's environment."""
+    for name in list(os.environ):
+        if name.startswith("TESP_API_S3__"):
+            monkeypatch.delenv(name)
+    monkeypatch.chdir(REPO_ROOT)
+    if os.path.exists(os.path.join(REPO_ROOT, ".secrets.toml")):
+        pytest.skip("a local .secrets.toml may override the S3 settings")
+
+
+def test_settings_are_read_from_environment(monkeypatch, clean_settings):
     monkeypatch.setenv("TESP_API_S3__ENDPOINT_URL", "https://objectstore.example.org")
     monkeypatch.setenv("TESP_API_S3__REGION", "nl-ams-1")
     monkeypatch.setenv("TESP_API_S3__ACCESS_KEY_ID", ACCESS_KEY)
@@ -101,9 +118,13 @@ def test_settings_are_read_from_environment(monkeypatch):
     )
 
 
-def test_default_settings_are_anonymous():
-    config = load_s3_config(get_properties())
-    assert config.access_key_id is None and config.secret_access_key is None
+def test_default_settings_are_anonymous_aws(clean_settings):
+    assert load_s3_config(get_properties()) == S3Config()
+
+
+def test_expiry_from_environment_is_an_int(monkeypatch, clean_settings):
+    monkeypatch.setenv("TESP_API_S3__PRESIGN_EXPIRY_SECONDS", "'600'")
+    assert load_s3_config(get_properties()).presign_expiry_seconds == 600
 
 
 def test_secret_is_not_in_config_repr():
@@ -163,31 +184,49 @@ def test_redact_presigned_urls():
     assert redacted.endswith("' && echo done")
 
 
-# --- stage-in ----------------------------------------------------------------
+# --- stage-in ---------------------------------------------------------------
 
-def _stage_in(url: str, io_type=TesTaskIOType.FILE) -> str:
+def _input_conf(url, io_type=TesTaskIOType.FILE) -> dict:
+    return {"url": url, "pulsar_path": "/staging/inputs/input_file_0", "type": io_type,
+            "container_path": "/data/in.txt"}
+
+
+def _stage_in(input_confs) -> str:
     executor = TesTaskExecutor(image="willdockerhub/curl-wget:latest", command=[], workdir="/downloads")
-    input_conf = {"url": _s3(url), "pulsar_path": "/staging/inputs/input_file_0", "type": io_type,
-                  "container_path": "/data/in.txt"}
-    return stage_in_command(executor, {}, "/staging/inputs", [input_conf], "docker")
+    return stage_in_command(executor, {}, "/staging/inputs", input_confs, "docker")
 
 
-def test_stage_in_downloads_s3_input_from_configured_endpoint(monkeypatch):
-    monkeypatch.setattr(client_s3, "load_s3_config", lambda *args: SIGNED)
-    command = _stage_in("s3://my-bucket/work/ab/in.txt")
+def test_presign_s3_inputs_replaces_only_s3_urls():
+    confs = [_input_conf(_s3("s3://my-bucket/work/ab/in.txt")), _input_conf("http://172.17.0.1:5000/test.txt")]
+    staged = presign_s3_inputs(confs, SIGNED)
+    assert staged[0]["presigned"] is True
+    assert staged[0]["url"].startswith("https://s3.example.org/my-bucket/work/ab/in.txt?")
+    assert staged[1] == confs[1]
+    assert isinstance(confs[0]["url"], S3Url)  # input confs are not modified
+
+
+def test_stage_in_downloads_presigned_url():
+    command = _stage_in(presign_s3_inputs([_input_conf(_s3("s3://my-bucket/work/ab/in.txt"))], SIGNED))
     assert "s3://" not in command
     assert "https://s3.example.org/my-bucket/work/ab/in.txt?" in command
     assert SECRET_KEY not in command
 
 
-def test_stage_in_hides_presigned_urls_from_shell_trace(monkeypatch):
-    monkeypatch.setattr(client_s3, "load_s3_config", lambda *args: SIGNED)
-    command = _stage_in("s3://my-bucket/in.txt")
-    assert command.startswith("{ set +x; } 2>/dev/null && ")
-    assert command.endswith(" && set -x")
-
-
-def test_stage_in_rejects_s3_directory_inputs(monkeypatch):
-    monkeypatch.setattr(client_s3, "load_s3_config", lambda *args: SIGNED)
+def test_presign_s3_inputs_rejects_directories():
     with pytest.raises(ValueError):
-        _stage_in("s3://my-bucket/dir/", TesTaskIOType.DIRECTORY)
+        presign_s3_inputs([_input_conf(_s3("s3://my-bucket/dir/"), TesTaskIOType.DIRECTORY)], SIGNED)
+
+
+def test_presign_s3_inputs_rejects_legacy_urls_of_stored_tasks():
+    with pytest.raises(ValueError):
+        presign_s3_inputs([_input_conf(_s3("s3://user:pass@host:9000/bucket/key"))], SIGNED)
+
+
+def test_untraced_command_is_not_in_shell_trace():
+    signed = presign_get_url(_s3("s3://my-bucket/in.txt"), SIGNED)
+    script = f"set -xe && echo before && {untraced(f'test -n {signed!r}')} && echo after"
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "X-Amz-Signature" not in result.stderr
+    assert "set +x" not in result.stderr
+    assert "+ echo after" in result.stderr  # tracing is back on

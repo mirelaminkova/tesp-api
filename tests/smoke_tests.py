@@ -254,8 +254,6 @@ def cleanup_uploaded_data():
         print(f"Failed to remove sleep containers: {e}")
 
 
-
-
 # S3 inputs (issue #3). MinIO runs in the compose "pulsar" profile; tesp-api gets the endpoint and
 # credentials through TESP_API_S3__* in docker-compose.yaml. The URLs in the task carry no credentials.
 S3_TEST_ENDPOINT = "http://localhost:9000"
@@ -273,16 +271,14 @@ def _s3_test_client():
 
 def _s3_put_test_object(key, body):
     client = _s3_test_client()
-    for _ in range(60):  # MinIO may still be starting
+    for _ in range(60):  # MinIO may still be starting; compose creates the bucket
         try:
             client.head_bucket(Bucket=S3_TEST_BUCKET)
             break
         except Exception:
-            try:
-                client.create_bucket(Bucket=S3_TEST_BUCKET)
-                break
-            except Exception:
-                time.sleep(2)
+            time.sleep(2)
+    else:
+        raise RuntimeError(f"MinIO bucket {S3_TEST_BUCKET} not reachable at {S3_TEST_ENDPOINT}")
     client.put_object(Bucket=S3_TEST_BUCKET, Key=key, Body=body)
 
 # Downloads a plain s3://bucket/key input using the server-side S3 settings.
@@ -291,6 +287,7 @@ def test_s3_input():
     _s3_put_test_object("smoke/input.txt", content.encode())
     task = {
         "inputs": [{"path": "/data/s3_input", "url": f"s3://{S3_TEST_BUCKET}/smoke/input.txt", "type": "FILE"}],
+        # The object has no trailing newline; grep -x still matches its single line.
         "executors": [{"image": "ubuntu", "command": ["grep", "-qx", content, "/data/s3_input"]}]
     }
     task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
@@ -306,7 +303,7 @@ def test_s3_legacy_url_rejected():
         "inputs": [{"path": "/data/in", "url": "s3://user:legacy-password@172.17.0.1:9000/tesp-test/in.txt"}],
         "executors": [{"image": "ubuntu", "command": ["true"]}]
     }
-    resp = requests.post(f"{base_url}/v1/tasks", json=task)
+    resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
     assert resp.status_code == 400
     assert "inputs[0].url" in resp.text
     assert "legacy-password" not in resp.text

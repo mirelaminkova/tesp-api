@@ -189,15 +189,18 @@ TESP_API_S3__SECRET_ACCESS_KEY=...
 
 How it works: when a task starts, `TESP API` turns each S3 input into a presigned `GET` URL (computed locally, no request
 to S3) and the Pulsar staging container downloads it with `curl`. The secret key never leaves `TESP API`. The presigned
-URLs are kept out of the job's shell trace and the `TESP API` debug log, so they are not stored with the task, but they are
-part of the job command Pulsar runs, so whoever operates Pulsar can see them until they expire. Keep
+URLs are kept out of the job's shell trace (stored as the task's stderr) and out of the `TESP API` log of the job command,
+so they are not stored with the task. They are part of the job command sent to Pulsar (as a query parameter of the
+Pulsar REST call), so they can appear in Pulsar's and any proxy's logs until they expire. Keep
 `s3.presign_expiry_seconds` no longer than the time tasks may wait in Pulsar before staging starts.
 
 Limitations:
 - Legacy `s3://user:password@host:port/bucket/key` URLs (credentials or endpoint in the URL) are refused with
-  `400 Bad Request`, so credentials are never stored with a task. Tasks stored by older versions are not changed.
+  `400 Bad Request`, so credentials are never stored with a task. Tasks stored by older versions keep their URLs; if
+  such a task still has to run, its stage-in fails.
 - Keys are used literally, without percent-decoding. URLs with a query (e.g. `?versionId=`) or fragment are refused.
-- S3 `DIRECTORY` inputs and S3 outputs are not supported yet.
+- S3 `DIRECTORY` inputs are refused with `400 Bad Request`. S3 outputs are not supported yet: such tasks are accepted
+  but fail when the outputs are uploaded.
 - The endpoint must be reachable from the Pulsar staging containers. For HTTPS endpoints with a private CA, the
   staging image must trust that CA.
 
@@ -220,7 +223,7 @@ which ports to be used etc. Following services are currently defined by [./docke
 - **tesp-api** - This project itself. Depends on mongodb
 - **tesp-db**  - [MongoDB](https://www.mongodb.com/) instance for persistence layer
 - **pulsar_rest** - `Pulsar` configured to use REST API with access to a docker instance thanks to [DIND](https://hub.docker.com/_/docker) (enabled with `--profile pulsar`).
-- **minio** - S3-compatible object store for the S3 smoke tests, on port 9000 with test-only credentials (enabled with `--profile pulsar`). `tesp-api` is configured to read S3 inputs from it.
+- **minio** - S3-compatible object store for the S3 smoke tests, on port 9000 with test-only credentials (enabled with `--profile pulsar`). The `tesp-api` service is configured with this endpoint and these credentials (`TESP_API_S3__*`); change them when you use another object store.
 
 If you want HTTP/FTP/S3 data transfer services for testing, use the separate
 [docker/dts](docker/dts/README.md) compose stack.

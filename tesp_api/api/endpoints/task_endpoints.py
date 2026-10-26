@@ -41,11 +41,14 @@ async def create_task(
         token_subject: str = Depends(parse_verify_token),
         tes_task: TesTask = Body(...)
         ) -> Response:
+    # Checked here rather than in a pydantic validator: tasks stored by older versions must still load, and the
+    # error must not echo the URL, which may contain credentials.
     unsupported_s3_urls = find_unsupported_s3_urls(tes_task)
     if unsupported_s3_urls:
         return get_response_for_error_model(get_error_response_model(
             HTTPStatus.BAD_REQUEST,
-            message=f"Unsupported S3 URL in {', '.join(unsupported_s3_urls)}: use s3://bucket/key. "
+            message=f"Unsupported S3 URL in {', '.join(unsupported_s3_urls)}: use s3://bucket/key (S3 directory "
+                    f"inputs are not supported yet). "
                     f"Credentials, host and port in S3 URLs are not accepted; the S3 endpoint and "
                     f"credentials are configured on the server."))
     task_to_create = RegisteredTesTask(
