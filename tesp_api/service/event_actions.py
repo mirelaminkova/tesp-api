@@ -239,7 +239,7 @@ async def handle_run_task(event: Event) -> None:
                 job_directory=payload['task_config'].get('job_directory') if CONTAINER_TYPE == "singularity" else None
             )
 
-        # Combine all commands into a single (untraced, see job_script) string for Pulsar
+        # Single job script for Pulsar (untraced, see job_script)
         run_command_str = job_script(stage_in_cmd, *container_cmds, stage_out_cmd)
 
         command_start_time = datetime.datetime.now(datetime.timezone.utc)

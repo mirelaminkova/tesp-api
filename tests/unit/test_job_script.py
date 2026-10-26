@@ -4,6 +4,7 @@ Pulsar stores the job's stderr as ``ExecutorLog.stderr``, so the script must not
 would put executor env values, presigned URLs and host paths into the task's logs. The tests run the script with the
 host's ``sh``, with ``echo``/``false`` standing in for the container commands.
 """
+import shlex
 import subprocess
 
 from tesp_api.utils.job_script import job_script
@@ -22,9 +23,9 @@ def test_no_commands_is_no_script():
 
 def test_script_is_not_traced():
     script = job_script(
-        f"echo stage-in >/dev/null {SIGNED_URL!r}",
+        f"echo stage-in >/dev/null {shlex.quote(SIGNED_URL)}",
         f"SECRET={SECRET} sh -c 'echo hi'",
-        f"echo stage-out >/dev/null {SIGNED_URL!r}",
+        f"echo stage-out >/dev/null {shlex.quote(SIGNED_URL)}",
     )
     result = _run(script)
     assert result.returncode == 0, result.stderr
@@ -32,22 +33,10 @@ def test_script_is_not_traced():
     assert result.stderr == ""
 
 
-def test_script_does_not_switch_tracing_on():
-    script = job_script("true")
-    assert "set -x" not in script
-    assert "set -xe" not in script
-    assert "-x" not in script.split("&&")[0]
-
-
-def test_failing_stage_fails_the_job_and_stops_it():
-    result = _run(job_script("echo stage-in", "false", "echo stage-out"))
-    assert result.returncode != 0
-    assert result.stdout == "stage-in\n"
-
-
-def test_exit_code_of_failing_stage_is_kept():
-    result = _run(job_script("echo stage-in", "sh -c 'exit 3'"))
+def test_failing_stage_ends_the_job_with_its_exit_code():
+    result = _run(job_script("echo stage-in", "sh -c 'exit 3'", "echo stage-out"))
     assert result.returncode == 3
+    assert result.stdout == "stage-in\n"
 
 
 def test_stages_run_in_order():
