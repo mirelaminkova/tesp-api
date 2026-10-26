@@ -355,26 +355,9 @@ def stage_out_command(
         .with_workdir(executor.workdir) \
         .with_resource(resource_conf)
 
-    commands = []
-    for output in output_confs:
-        path = output['container_path']
-        url = output['url']
-        output_type = output.get('type', TesTaskIOType.FILE)
-        
-        if output_type == TesTaskIOType.DIRECTORY:
-            # Recursive upload
-            cmd = (
-                f"find {shlex.quote(path)} -type f -exec "
-                f"curl -f -X POST -F 'file=@{{}}' {shlex.quote(url)} \\;"
-            )
-        else:
-            # Single file upload
-            cmd = f"curl -f -X POST -F 'file=@{shlex.quote(path)}' {shlex.quote(url)}"
-        
-        commands.append(cmd)
-    
-    if commands:
-        builder.with_command(["sh", "-c", " && ".join(commands)])
+    script = stage_out_script(output_confs)
+    if script:
+        builder.with_command(["sh", "-c", script])
 
     # Mount required directories
     if container_type == "singularity" and bind_mount:
@@ -389,6 +372,83 @@ def stage_out_command(
             builder.with_env(env_name, env_value)
 
     return builder.get_run_command()
+
+def _curl_quoted(value: str) -> str:
+    """
+    ``value`` as a double-quoted file name in a ``curl -F`` argument, so ``;`` and ``,`` are not parsed. The sed in
+    ``_DIRECTORY_LOOP`` applies the same escaping in the shell.
+    """
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+# In the directory loop below: $f is ./<relative path>, $r the relative path, $q the relative path escaped for
+# curl -F (see _curl_quoted). The "_" keeps a trailing newline of a file name from being stripped by $(...).
+_DIRECTORY_LOOP = (
+    'for f; do r=${f#./}; q=$(printf "%s_" "$r" | sed \'s/[\\\\"]/\\\\&/g\'); q=${q%_}; '
+    '{upload} || exit 1; done'
+)
+# Files per upload loop. BusyBox find -exec ... + can build an argument list that is too long and then silently skips
+# files, so the batches are bounded with xargs.
+_DIRECTORY_BATCH = 100
+
+
+# All curl calls use -g (--globoff): curl would otherwise expand {a,b} and [1-2] in task-provided URLs.
+
+
+def _file_upload(conf: dict, path: str) -> str:
+    url = shlex.quote(conf['url'])
+    if conf.get('upload') == 's3_put':
+        return f"curl -fsSg -T {shlex.quote(path)} {url}"
+    # Multipart POST; the file name sent is the base name of the path.
+    return f"curl -fsSg -X POST -F {shlex.quote('file=@' + _curl_quoted(path))} {url}"
+
+
+def _directory_upload(conf: dict, path: str) -> str:
+    url = shlex.quote(conf['url'])
+    if conf.get('upload') == 's3_post':
+        # --form-string sends values literally. S3 ignores fields after the file, so the file goes last.
+        fields = [f"--form-string key={shlex.quote(conf['key_prefix'])}\"$r\""] + [
+            f"--form-string {shlex.quote(f'{name}={value}')}" for name, value in conf['form_fields'].items()]
+        # S3 would replace ${filename} in the key with the multipart file name, so such files fail the upload.
+        upload = (
+            "case \"$r\" in *'${filename}'*) "
+            "echo \"tesp-api: cannot upload $r to S3: its name contains \\${filename}\" >&2; exit 1;; esac; "
+            f"curl -fsSg {' '.join(fields)} -F \"file=@\\\"$q\\\"\" {url}"
+        )
+    else:
+        # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
+        upload = f"curl -fsSg -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
+    loop = _DIRECTORY_LOOP.replace("{upload}", upload)
+    # Symbolic links are not followed, as they could point outside the directory or form loops; each is reported.
+    # The status of find is lost in the pipe, so a first find pass fails the upload on e.g. unreadable directories.
+    # xargs fails if an upload fails.
+    skipped_link = shlex.quote('echo "tesp-api: $0/${1#./} is a symbolic link, skipped" >&2')
+    return (
+        f"( cd {shlex.quote(path)} && find . -type l -exec sh -c {skipped_link} {shlex.quote(path)} {{}} \\; && "
+        f"find . -type f -print0 | xargs -0 -n {_DIRECTORY_BATCH} sh -c {shlex.quote(loop)} sh )"
+    )
+
+
+def stage_out_script(output_confs: List[dict]) -> str:
+    """
+    Shell script that uploads the outputs, run in the stage-out container after the executors. HTTP(S) outputs are
+    sent as multipart ``POST`` (form field ``file``), S3 outputs (see ``presign_s3_outputs``) with a presigned ``PUT``
+    (FILE) or presigned POST policy (DIRECTORY). DIRECTORY outputs upload every file below the directory, keeping
+    their relative paths. Outputs whose path does not exist are skipped with a message on stderr: TES has no notion of
+    optional outputs, and clients such as Nextflow check for missing outputs themselves. A failed upload fails the
+    script.
+    """
+    commands = []
+    for conf in output_confs:
+        path = conf['container_path']
+        if conf.get('type', TesTaskIOType.FILE) == TesTaskIOType.DIRECTORY:
+            upload = _directory_upload(conf, path)
+        else:
+            upload = _file_upload(conf, path)
+        # Only a path that does not exist is skipped; one of the wrong type makes the upload (cd or curl) fail.
+        skipped = shlex.quote(f"tesp-api: output {path} not found, skipped")
+        commands.append(f"if [ -e {shlex.quote(path)} ]; then {upload}; else echo {skipped} >&2; fi")
+    return " && ".join(commands)
 
 def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):
     output_confs: List[dict] = []

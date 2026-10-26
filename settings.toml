@@ -13,7 +13,7 @@ basic_auth.enable = false
 basic_auth.username = "user"
 basic_auth.password = "password"
 
-# S3 inputs given as s3://bucket/key. Set credentials in .secrets.toml or in the environment
+# S3 inputs and outputs given as s3://bucket/key. Set credentials in .secrets.toml or in the environment
 # (TESP_API_S3__ACCESS_KEY_ID, TESP_API_S3__SECRET_ACCESS_KEY), never in this file.
 s3.endpoint_url = ""              # e.g. "https://s3.example.org"; empty means AWS S3
 s3.region = "us-east-1"
@@ -21,6 +21,7 @@ s3.access_key_id = ""             # empty means anonymous access (public buckets
 s3.secret_access_key = ""
 s3.addressing_style = "path"      # "path", "virtual" or "auto"
 s3.presign_expiry_seconds = 3600  # lifetime of the download URLs handed to Pulsar
+s3.output_presign_expiry_seconds = 86400  # lifetime of the upload URLs; must cover the whole run of a task
 
 [dev-docker]
 db.mongodb_uri = "mongodb://tesp-db:27017"

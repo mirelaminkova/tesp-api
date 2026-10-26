@@ -18,7 +18,8 @@ from pathlib import Path
 import pytest
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskIOType
-from tesp_api.utils.container import ContainerCommandBuilder, run_command, stage_in_command, stage_out_command
+from tesp_api.utils.container import ContainerCommandBuilder, run_command, stage_in_command, stage_out_command, \
+    stage_out_script
 
 CONTAINER_TYPES = ["docker", "singularity"]
 MARKER = f"/tmp/tesp-api-quoting-test-pwned-{os.getpid()}"
@@ -275,3 +276,76 @@ def test_stage_out_passes_values_intact(container_type, value, tmp_path):
     call = _runtime_call(_run_with_stubs(command, tmp_path))
     assert _env_args(container_type, call) == {"VAR": value}
     assert f"vol-job-out{value}:/out{value}" in _mount_args(container_type, call["argv"])
+
+
+# --- stage-out upload script (issue #4) -----------------------------------------------------------------------
+
+CURL_STUB = f"""#!{sys.executable}
+import json, os, sys
+with open(os.environ["STUB_LOG"], "a") as log:
+    log.write(json.dumps({{"argv": ["curl", *sys.argv[1:]], "cwd": os.getcwd()}}) + "\\n")
+"""
+
+
+def _hostile_output_confs(value, root):
+    """HTTP, presigned S3 PUT and presigned S3 POST outputs whose paths, URLs, keys and form fields hold `value`."""
+    return [
+        {'container_path': f"{root}/file{value}", 'url': f"http://example.org/upload/{value}",
+         'volume_name': "vol-job-out", 'type': TesTaskIOType.FILE},
+        {'container_path': f"{root}/put{value}", 'url': f"https://s3.example.org/b/{value}?X-Amz-Signature={value}",
+         'volume_name': "vol-job-out", 'type': TesTaskIOType.FILE, 'upload': 's3_put', 'presigned': True},
+        {'container_path': f"{root}/dir{value}", 'url': f"https://s3.example.org/{value}",
+         'volume_name': "vol-job-out", 'type': TesTaskIOType.DIRECTORY, 'upload': 's3_post', 'presigned': True,
+         'key_prefix': f"work/{value}/", 'form_fields': {'policy': value, 'x-amz-signature': value}},
+        {'container_path': f"{root}/httpdir{value}", 'url': f"http://example.org/{value}",
+         'volume_name': "vol-job-out", 'type': TesTaskIOType.DIRECTORY},
+    ]
+
+
+@pytest.mark.parametrize("container_type", CONTAINER_TYPES)
+@pytest.mark.parametrize("value", HOSTILE, ids=HOSTILE_IDS)
+def test_stage_out_script_reaches_the_container_intact(container_type, value, tmp_path):
+    stage_exec = TesTaskExecutor(image="curl-image", command=[], workdir=Path("/downloads"))
+    output_confs = _hostile_output_confs(value, "/out")
+    volume_confs = [{'volume_name': "vol-job-out", 'container_path': "/out"}]
+
+    command = stage_out_command(stage_exec, {}, output_confs, volume_confs, container_type,
+                                bind_mount="/staging/inputs")
+
+    argv = _runtime_call(_run_with_stubs(command, tmp_path))["argv"]
+    assert argv[-3:-1] == ["sh", "-c"]
+    assert argv[-1] == stage_out_script(output_confs)
+
+
+@pytest.mark.parametrize("value", HOSTILE, ids=HOSTILE_IDS)
+def test_stage_out_script_passes_paths_urls_and_keys_intact(value, tmp_path):
+    root = tmp_path / "out"
+    root.mkdir()
+    name = value.replace("/", "%")  # a file name cannot contain "/"
+    output_confs = _hostile_output_confs(name, str(root))
+    for conf in output_confs:
+        path = Path(conf['container_path'])
+        if conf['type'] == TesTaskIOType.DIRECTORY:
+            (path / "sub").mkdir(parents=True)
+            (path / "sub" / f"f{name}").write_text("x")
+        else:
+            path.write_text("x")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(CURL_STUB)
+    (bin_dir / "curl").chmod(0o755)
+    log = tmp_path / "curl.jsonl"
+
+    result = subprocess.run(["sh", "-c", stage_out_script(output_confs)], capture_output=True, text=True,
+                            timeout=30, env={"PATH": f"{bin_dir}:/usr/bin:/bin", "STUB_LOG": str(log)})
+
+    assert result.returncode == 0, result.stderr
+    assert not os.path.exists(MARKER), "a task value was executed by the shell"
+    file_call, put_call, post_call, http_dir_call = [json.loads(line)["argv"] for line in log.read_text().splitlines()]
+    assert file_call[-1] == output_confs[0]['url']
+    assert put_call[put_call.index("-T") + 1] == output_confs[1]['container_path']
+    assert put_call[-1] == output_confs[1]['url']
+    assert post_call[-1] == output_confs[2]['url']
+    form_strings = [post_call[i + 1] for i, arg in enumerate(post_call) if arg == "--form-string"]
+    assert form_strings == [f"key=work/{name}/sub/f{name}", f"policy={name}", f"x-amz-signature={name}"]
+    assert http_dir_call[-1] == output_confs[3]['url']

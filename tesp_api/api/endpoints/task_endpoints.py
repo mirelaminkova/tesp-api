@@ -12,7 +12,7 @@ from tesp_api.api.error import api_handle_error, get_error_response_model, get_r
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog, \
-    find_unsupported_s3_urls, find_invalid_container_fields
+    find_unsupported_s3_urls, find_unsupported_outputs, find_invalid_container_fields
 from tesp_api.utils.functional import maybe_of, identity_with_side_effect
 from tesp_api.api.model.task_service_info import TesServiceInfo, TesServiceType, TesServiceOrganization
 from tesp_api.api.model.response_models import \
@@ -48,9 +48,15 @@ async def create_task(
         return get_response_for_error_model(get_error_response_model(
             HTTPStatus.BAD_REQUEST,
             message=f"Unsupported S3 URL in {', '.join(unsupported_s3_urls)}: use s3://bucket/key (S3 directory "
-                    f"inputs and S3 outputs are not supported yet). "
+                    f"inputs are not supported yet, and S3 DIRECTORY output keys must not contain ${{filename}}). "
                     f"Credentials, host and port in S3 URLs are not accepted; the S3 endpoint and "
                     f"credentials are configured on the server."))
+    unsupported_outputs = find_unsupported_outputs(tes_task)
+    if unsupported_outputs:
+        return get_response_for_error_model(get_error_response_model(
+            HTTPStatus.BAD_REQUEST,
+            message=f"Unsupported output in {', '.join(unsupported_outputs)}: output paths must be absolute; "
+                    f"wildcards (*, ?) are not supported."))
     invalid_container_fields = find_invalid_container_fields(tes_task)
     if invalid_container_fields:
         return get_response_for_error_model(get_error_response_model(

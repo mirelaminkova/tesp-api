@@ -17,7 +17,7 @@ from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.service.event_handler import Event, local_handler
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.service.file_transfer_service import file_transfer_service
-from tesp_api.service.client.client_s3 import presign_s3_inputs, redact_presigned_urls
+from tesp_api.service.client.client_s3 import presign_s3_inputs, presign_s3_outputs, redact_presigned_urls
 from tesp_api.service.error import pulsar_event_handle_error, TaskNotFoundError, TaskExecutorError
 from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType, job_streams
 from tesp_api.repository.model.task import (
@@ -233,12 +233,16 @@ async def handle_run_task(event: Event) -> None:
         # Stage-out command
         stage_out_cmd = ""
         if output_confs:
+            stage_out_confs = presign_s3_outputs(output_confs)
             stage_out_cmd = stage_out_command(
-                stage_exec, resource_conf, output_confs, volume_confs,
+                stage_exec, resource_conf, stage_out_confs, volume_confs,
                 container_type=CONTAINER_TYPE,
                 bind_mount=payload['task_config'].get('inputs_directory') if CONTAINER_TYPE == "singularity" else None,
                 job_directory=payload['task_config'].get('job_directory') if CONTAINER_TYPE == "singularity" else None
             )
+            if any(conf.get('presigned') for conf in stage_out_confs):
+                # As for stage-in: presigned URLs and POST signatures must stay out of the stored `set -x` trace.
+                stage_out_cmd = untraced(stage_out_cmd)
 
         # Combine all commands into a single string for Pulsar
         executors_commands_joined_str = " && ".join(filter(None, container_cmds))

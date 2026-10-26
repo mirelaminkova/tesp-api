@@ -245,7 +245,7 @@ class RegisteredTesTask(TesTask):
 def find_unsupported_s3_urls(task: TesTask) -> List[str]:
     """
     Returns the fields (e.g. ``inputs[0].url``) holding S3 URLs that are not plain ``s3://bucket/key``, plus S3
-    directory inputs and S3 outputs, which are not supported yet. Legacy ``s3://user:pass@host:port/bucket/key`` URLs are refused so
+    directory inputs, which are not supported yet. Legacy ``s3://user:pass@host:port/bucket/key`` URLs are refused so
     credentials never get stored with a task. The URLs themselves are not returned, so callers can put the result
     into responses and logs.
     """
@@ -254,7 +254,24 @@ def find_unsupported_s3_urls(task: TesTask) -> List[str]:
         for field, items in (("inputs", task.inputs), ("outputs", task.outputs))
         for i, item in enumerate(items or [])
         if isinstance(item.url, S3Url) and (
-            not item.url.is_plain() or field == "outputs" or item.type == TesTaskIOType.DIRECTORY)
+            not item.url.is_plain()
+            or (field == "inputs" and item.type == TesTaskIOType.DIRECTORY)
+            # A presigned POST replaces ${filename} in the key (see presign_post_policy).
+            or (field == "outputs" and item.type == TesTaskIOType.DIRECTORY and "${filename}" in item.url.key))
+    ]
+
+
+def find_unsupported_outputs(task: TesTask) -> List[str]:
+    """
+    Returns the fields of outputs that cannot be uploaded: paths that are not absolute or contain the wildcards ``*``
+    or ``?`` (TES 1.1 ``path_prefix`` outputs, not supported yet). Without this check such an output would be skipped
+    as missing. ``[`` is allowed, as it is common in file names; ``path_prefix`` is ignored, as TES 1.1 says for paths
+    without wildcards.
+    """
+    return [
+        f"outputs[{i}].path"
+        for i, output in enumerate(task.outputs or [])
+        if not output.path.startswith("/") or any(c in output.path for c in "*?")
     ]
 
 

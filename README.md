@@ -167,8 +167,8 @@ Container execution runtime is controlled by the `CONTAINER_TYPE` environment va
 `singularity`). The default is `docker`.
 
 &nbsp;
-### S3 inputs
-Inputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
+### S3 inputs and outputs
+Inputs and outputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
 TES executor with an S3 work dir). The S3 endpoint and credentials are configured on the server, never in the URL:
 
 | Setting | Environment variable | Default | Meaning |
@@ -179,6 +179,7 @@ TES executor with an S3 work dir). The S3 endpoint and credentials are configure
 | `s3.secret_access_key` | `TESP_API_S3__SECRET_ACCESS_KEY` | empty | Secret key; must be set together with the access key |
 | `s3.addressing_style` | `TESP_API_S3__ADDRESSING_STYLE` | `path` | `path` (`https://endpoint/bucket/key`, needed by most self-hosted stores), `virtual` (`https://bucket.endpoint/key`) or `auto` |
 | `s3.presign_expiry_seconds` | `TESP_API_S3__PRESIGN_EXPIRY_SECONDS` | `3600` | Lifetime of the download URLs (1 s to 7 days) |
+| `s3.output_presign_expiry_seconds` | `TESP_API_S3__OUTPUT_PRESIGN_EXPIRY_SECONDS` | `86400` | Lifetime of the upload URLs and POST policies (1 s to 7 days). Outputs are uploaded after the executors finish, so it must cover queueing plus the whole run of a task |
 
 Put the keys in the environment or in `.secrets.toml` (git-ignored), not in `settings.toml`, e.g.
 ```
@@ -194,12 +195,27 @@ so they are not stored with the task; botocore's debug logging, which would show
 Pulsar REST call), so they can appear in Pulsar's and any proxy's logs until they expire. Keep
 `s3.presign_expiry_seconds` no longer than the time tasks may wait in Pulsar before staging starts.
 
+Outputs work the same way, except that the upload happens after the executors finished: a `FILE` output gets a
+presigned `PUT` URL for its key, which the stage-out container uploads with `curl -T`. A `DIRECTORY` output gets a
+presigned POST policy (S3 browser-based upload) whose only key condition is `starts-with` the output key plus `/`; the
+stage-out container sends every file below the directory with its relative path appended, so `s3://bucket/work/results`
+for `/data/results/sub/a.txt` becomes `s3://bucket/work/results/sub/a.txt`. A leaked upload URL or policy lets someone
+write that one key, or keys below that prefix, until it expires (`s3.output_presign_expiry_seconds`); it gives no read
+access and the secret key still never leaves `TESP API`.
+
 Limitations:
 - Legacy `s3://user:password@host:port/bucket/key` URLs (credentials or endpoint in the URL) are refused with
   `400 Bad Request`, so credentials are never stored with a task. Tasks stored by older versions keep their URLs; if
   such a task still has to run, its stage-in fails.
 - Keys are used literally, without percent-decoding. URLs with a query (e.g. `?versionId=`) or fragment are refused.
-- S3 `DIRECTORY` inputs and S3 outputs are not supported yet and are refused with `400 Bad Request`.
+- S3 `DIRECTORY` inputs are not supported yet and are refused with `400 Bad Request`.
+- A `DIRECTORY` output needs a key prefix: `s3://bucket` and `s3://bucket/` are refused with `400 Bad Request`, as are
+  `DIRECTORY` output keys containing `${filename}` (S3 POST uploads substitute it).
+- Each output file is uploaded in a single request, so AWS S3 limits it to 5 GB.
+- Any submitter can write to any key the server's credentials can write; there is no per-user bucket or prefix
+  restriction.
+- The upload URLs are created when the task starts running. A task that runs longer than
+  `s3.output_presign_expiry_seconds` fails to upload its S3 outputs.
 - The endpoint must be reachable from the Pulsar staging containers. For HTTPS endpoints with a private CA, the
   staging image must trust that CA.
 
@@ -343,6 +359,10 @@ longer configured to redirect stdout into the file.
 | _TES_    | Only `cpu_cores` and `ram_gb` are mapped to container runtime flags. Other resource fields (disk, preemptible, zones) are stored but not enforced.                                  |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
+| _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's stderr) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
+| _TES_    | Outputs are uploaded to `s3://` URLs and to HTTP(S) upload endpoints (multipart `POST`, form field `file`). Other URLs, such as the `ftp://` output in the example above, get the same `curl` multipart `POST`, which is not an FTP upload, so FTP outputs do not work. |
+| _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's stderr). |
+| _TES_    | Output paths must be absolute. Wildcards (`*`, `?`; TES 1.1 `path_prefix` outputs) are not supported and are refused with `400 Bad Request`. |
 | _TES_    | When an executor sets `stdin`, `stdout` or `stderr`, its image must provide `sh`. `logs.logs.stdout`/`stderr` then hold the last 64 KiB of each redirected stream, filtered to printable ASCII, so non-ASCII text is dropped from the log (the file keeps the exact bytes); without `tail`/`tr` in the image the log copy is empty. |
 
 &nbsp;

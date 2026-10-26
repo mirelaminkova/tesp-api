@@ -25,7 +25,7 @@ docker compose --profile pulsar up -d --build
 
 ### 1. Start the upload server
 
-For I/O tests (`test_inputs`, `test_dir_input`, `test_volumes`, `test_envs`, `test_stdout`, `test_stderr`), the test fixtures download/upload files via HTTP. Start the local file server:
+For I/O tests (`test_inputs`, `test_dir_input`, `test_outputs`, `test_volumes`, `test_envs`, `test_stdout`, `test_stderr`), the test fixtures download/upload files via HTTP. Start the local file server:
 
 ```bash
 python3 tests/upload_server.py
@@ -103,7 +103,7 @@ The `docker/dts/` directory contains an **alternative** test infrastructure with
 
 ## S3
 
-`test_s3_input` and `test_s3_legacy_url_rejected` use the `minio` service from the root `docker-compose.yaml` (profile `pulsar`, port 9000), which creates the `tesp-test` bucket; the test uploads its object from the host. MinIO is published on the docker bridge address only (`172.17.0.1:9000`). `tesp-api` only signs URLs for `http://172.17.0.1:9000` with the test credentials from `docker-compose.yaml`; the Pulsar staging containers download from there. Like the other fixtures this relies on the default Docker bridge gateway on Linux.
+`test_s3_input`, `test_s3_outputs` and `test_s3_legacy_url_rejected` use the `minio` service from the root `docker-compose.yaml` (profile `pulsar`, port 9000), which creates the `tesp-test` bucket; `test_s3_input` uploads its object from the host and `test_s3_outputs` lists and reads the uploaded outputs from there. MinIO is published on the docker bridge address only (`172.17.0.1:9000`). `tesp-api` only signs URLs for `http://172.17.0.1:9000` with the test credentials from `docker-compose.yaml`; the Pulsar staging containers download from and upload to there. Like the other fixtures this relies on the default Docker bridge gateway on Linux.
 
 ### Using DTS instead of upload_server.py
 

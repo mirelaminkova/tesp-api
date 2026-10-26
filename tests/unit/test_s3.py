@@ -81,8 +81,8 @@ def test_plain_s3_input_is_supported():
     assert find_unsupported_s3_urls(_task("s3://bucket/in.txt")) == []
 
 
-def test_s3_outputs_are_reported_until_supported():
-    assert find_unsupported_s3_urls(_task(output_url="s3://bucket/out.txt")) == ["outputs[0].url"]
+def test_plain_s3_output_is_supported():
+    assert find_unsupported_s3_urls(_task(output_url="s3://bucket/out.txt")) == []
 
 
 def test_validation_errors_do_not_echo_legacy_secrets():
