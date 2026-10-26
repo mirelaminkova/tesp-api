@@ -408,10 +408,7 @@ from tesp_api.repository.model.task import find_unsupported_outputs  # noqa: E40
 @pytest.mark.parametrize("output, field", [
     ({"path": "/data/*.bam", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
     ({"path": "/data/sample?.txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
-    ({"path": "/data/[ab].txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
     ({"path": "data/out.txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
-    ({"path": "/data/out", "path_prefix": "/data", "url": UPLOAD_URL, "type": "DIRECTORY"},
-     "outputs[0].path_prefix"),
 ])
 def test_unsupported_output_paths_are_reported(output, field):
     assert find_unsupported_outputs(_task([output])) == [field]
@@ -420,6 +417,9 @@ def test_unsupported_output_paths_are_reported(output, field):
 def test_plain_output_paths_are_supported():
     assert find_unsupported_outputs(_task([
         {"path": "/data/out file.txt", "url": UPLOAD_URL, "type": "FILE"},
+        {"path": "/data/sample[1].txt", "url": UPLOAD_URL, "type": "FILE"},
+        # TES 1.1: path_prefix is ignored when the path has no wildcards.
+        {"path": "/data/out", "path_prefix": "/data", "url": UPLOAD_URL, "type": "DIRECTORY"},
         {"path": "/data/results", "url": "s3://bucket/results", "type": "DIRECTORY"},
     ])) == []
 
@@ -428,6 +428,10 @@ def test_s3_directory_output_key_with_filename_variable_is_reported():
     # S3 POST replaces ${filename} in the key field.
     task = _task([{"path": "/data/out", "url": "s3://bucket/a${filename}", "type": "DIRECTORY"}])
     assert find_unsupported_s3_urls(task) == ["outputs[0].url"]
+
+
+def test_redaction_keeps_other_parameters_ending_in_policy():
+    assert redact_presigned_urls("retention-policy=keep") == "retention-policy=keep"
 
 
 def test_redaction_hides_policy_which_contains_the_access_key_id():
@@ -466,6 +470,20 @@ def test_directory_output_does_not_follow_symbolic_links(fake_curl, tmp_path):
     result, calls = fake_curl([_output_conf(UPLOAD_URL, str(results), TesTaskIOType.DIRECTORY)])
     assert result.returncode == 0, result.stderr
     assert [list(call["files"].values()) for call in calls] == [["real\n"]]
+    assert f"tesp-api: {results}/loop is a symbolic link, skipped" in result.stderr.splitlines()
+    assert result.stderr.count("is a symbolic link, skipped") == 2
+
+
+def test_output_path_is_not_interpreted_by_the_shell(fake_curl, tmp_path):
+    results = tmp_path / 'odd $(touch pwned) "dir"'
+    results.mkdir()
+    (results / "link").symlink_to(".")
+    (results / "a.txt").write_text("a\n")
+    result, calls = fake_curl([_output_conf(UPLOAD_URL, str(results), TesTaskIOType.DIRECTORY)])
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "pwned").exists() and not (results / "pwned").exists()
+    assert f"tesp-api: {results}/link is a symbolic link, skipped" in result.stderr.splitlines()
+    assert len(calls) == 1
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can read any directory")

@@ -76,7 +76,6 @@ class TesTaskOutput(BaseModel):
                                          ' - file:///path/to/my/file')
 
     path: str = Field(..., description="Path of the file inside the container. Must be an absolute path.")
-    path_prefix: str = Field(None, description="TES 1.1, for paths with wildcards, which are not supported.")
     type: TesTaskIOType
 
 
@@ -262,13 +261,13 @@ def find_unsupported_s3_urls(task: TesTask) -> List[str]:
 
 def find_unsupported_outputs(task: TesTask) -> List[str]:
     """
-    Returns the fields of outputs that cannot be uploaded: paths that are not absolute or contain wildcards (TES 1.1
-    ``path_prefix`` outputs, not supported yet). Without this check such an output would be skipped as missing.
+    Returns the fields of outputs that cannot be uploaded: paths that are not absolute or contain the wildcards ``*``
+    or ``?`` (TES 1.1 ``path_prefix`` outputs, not supported yet). Without this check such an output would be skipped
+    as missing. ``[`` is allowed, as it is common in file names; ``path_prefix`` is ignored, as TES 1.1 says for paths
+    without wildcards.
     """
-    problems = []
-    for i, output in enumerate(task.outputs or []):
-        if not output.path.startswith("/") or any(c in output.path for c in "*?["):
-            problems.append(f"outputs[{i}].path")
-        elif output.path_prefix is not None:
-            problems.append(f"outputs[{i}].path_prefix")
-    return problems
+    return [
+        f"outputs[{i}].path"
+        for i, output in enumerate(task.outputs or [])
+        if not output.path.startswith("/") or any(c in output.path for c in "*?")
+    ]

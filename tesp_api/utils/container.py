@@ -409,13 +409,13 @@ def _directory_upload(conf: dict, path: str) -> str:
         # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
         upload = f"curl -fsS -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
     loop = _DIRECTORY_LOOP.replace("{upload}", upload)
-    # Symbolic links are not followed: they could point outside the directory, or form loops. A failing find (e.g. an
-    # unreadable directory) is recorded in $m, as its status is lost in the pipe; xargs fails if an upload fails.
+    # Symbolic links are not followed, as they could point outside the directory or form loops; each is reported.
+    # The status of find is lost in the pipe, so a first find pass fails the upload on e.g. unreadable directories.
+    # xargs fails if an upload fails.
+    skipped_link = shlex.quote('echo "tesp-api: $0/${1#./} is a symbolic link, skipped" >&2')
     return (
-        f"( cd {shlex.quote(path)} && m=$(mktemp) && "
-        f"{{ find . -type f -print0 || echo failed > \"$m\"; }} | "
-        f"xargs -0 -n {_DIRECTORY_BATCH} sh -c {shlex.quote(loop)} sh; "
-        f"s=$?; if [ -s \"$m\" ]; then s=1; fi; rm -f \"$m\"; exit $s )"
+        f"( cd {shlex.quote(path)} && find . -type l -exec sh -c {skipped_link} {shlex.quote(path)} {{}} \\; && "
+        f"find . -type f -print0 | xargs -0 -n {_DIRECTORY_BATCH} sh -c {shlex.quote(loop)} sh )"
     )
 
 

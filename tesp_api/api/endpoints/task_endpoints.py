@@ -56,7 +56,7 @@ async def create_task(
         return get_response_for_error_model(get_error_response_model(
             HTTPStatus.BAD_REQUEST,
             message=f"Unsupported output in {', '.join(unsupported_outputs)}: output paths must be absolute; "
-                    f"wildcards (*, ?, [) and path_prefix are not supported."))
+                    f"wildcards (*, ?) are not supported."))
     task_to_create = RegisteredTesTask(
         **tes_task.dict(),
         state=TesTaskState.QUEUED,
