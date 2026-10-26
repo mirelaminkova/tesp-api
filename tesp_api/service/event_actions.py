@@ -17,6 +17,7 @@ from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.service.event_handler import Event, local_handler
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.service.file_transfer_service import file_transfer_service
+from tesp_api.service.client.client_s3 import redact_presigned_urls
 from tesp_api.service.error import pulsar_event_handle_error, TaskNotFoundError, TaskExecutorError
 from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType
 from tesp_api.repository.model.task import (
@@ -248,7 +249,7 @@ async def handle_run_task(event: Event) -> None:
             logger.warning(f"Task {task_id} has no commands to run. Treating as successful no-op.")
             command_status = {'stdout': '', 'stderr': 'No commands to run.', 'returncode': 0}
         else:
-            logger.debug(f"Submitting job to Pulsar for task {task_id}: {run_command_str}")
+            logger.debug(f"Submitting job to Pulsar for task {task_id}: {redact_presigned_urls(run_command_str)}")
             await pulsar_operations.run_job(task_id, run_command_str)
             command_status = await pulsar_operations.job_status_complete(str(task_id))
 

@@ -69,6 +69,10 @@ All task JSON fixtures are in `test_jsons/`. Key files:
 
 The `docker/dts/` directory contains an **alternative** test infrastructure with MinIO (S3), FTP, and HTTP services running in containers. At the moment, only HTTP service is compatible with the smoke tests.
 
+## S3
+
+`test_s3_input` and `test_s3_legacy_url_rejected` use the `minio` service from the root `docker-compose.yaml` (profile `pulsar`, port 9000). The tests create the `tesp-test` bucket and object themselves; `tesp-api` reaches MinIO at `http://172.17.0.1:9000` with the test credentials set in `docker-compose.yaml`.
+
 ### Using DTS instead of upload_server.py
 
 ```bash

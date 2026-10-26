@@ -2,6 +2,7 @@
 .idea
 
 # Custom ignored files
+.secrets.toml
 *.uuid
 
 # Ignore MinIO system files

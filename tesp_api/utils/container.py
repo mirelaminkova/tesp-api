@@ -7,6 +7,7 @@ from typing import Dict, List, Tuple, Optional, Union
 from pymonad.maybe import Nothing, Maybe, Just
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskOutput, TesTaskIOType
+from tesp_api.service.client.client_s3 import presign_get_url
 from tesp_api.utils.functional import get_else_throw, maybe_of
 
 SHELL_PATTERN = re.compile(r"[|&;<>(){}$*?\"'\\]")
@@ -243,6 +244,7 @@ def stage_in_command(
         .with_directory(bind_mount)
 
     commands = []
+    has_presigned_urls = False
     for input_conf in input_confs:
         url = input_conf.get('url')
         if not url:
@@ -251,6 +253,12 @@ def stage_in_command(
         path = input_conf['pulsar_path']
         input_type = input_conf.get('type', TesTaskIOType.FILE)
         filename = os.path.basename(path)
+
+        if getattr(url, 'scheme', None) == 's3':
+            if input_type == TesTaskIOType.DIRECTORY:
+                raise ValueError('S3 directory inputs are not supported')
+            url = presign_get_url(url)
+            has_presigned_urls = True
         
         if input_type == TesTaskIOType.DIRECTORY:
             # Recursive download
@@ -271,6 +279,9 @@ def stage_in_command(
         for env_name, env_value in executor.env.items():
             builder.with_env(env_name, env_value)
 
+    if has_presigned_urls:
+        # Keep presigned URLs out of the `set -x` trace, which ends up in the task's stderr log.
+        return f"{{ set +x; }} 2>/dev/null && {builder.get_run_command()} && set -x"
     return builder.get_run_command()
 
 def run_command(

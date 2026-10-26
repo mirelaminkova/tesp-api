@@ -1,4 +1,6 @@
 """Unit tests for plain ``s3://bucket/key`` inputs with server-side S3 settings (issue #3)."""
+import sys
+
 import pydantic
 import pytest
 from urllib.parse import parse_qs, urlsplit
@@ -6,10 +8,12 @@ from urllib.parse import parse_qs, urlsplit
 from tesp_api.config.properties import get_properties
 from tesp_api.repository.model.task import TesTask, TesTaskIOType, find_unsupported_s3_urls
 from tesp_api.repository.model.task import TesTaskExecutor
-from tesp_api.service.client import client_s3
 from tesp_api.service.client.client_s3 import S3Config, load_s3_config, presign_get_url, redact_presigned_urls
 from tesp_api.utils.container import stage_in_command
 from tesp_api.utils.types import S3Url
+
+# tesp_api.service.client exports an instance named client_s3, which hides the module.
+client_s3 = sys.modules[S3Config.__module__]
 
 ACCESS_KEY = "AKIATESTACCESSKEY"
 SECRET_KEY = "test-secret-key-must-not-leak"

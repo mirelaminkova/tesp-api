@@ -167,6 +167,41 @@ Container execution runtime is controlled by the `CONTAINER_TYPE` environment va
 `singularity`). The default is `docker`.
 
 &nbsp;
+### S3 inputs
+Inputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
+TES executor with an S3 work dir). The S3 endpoint and credentials are configured on the server, never in the URL:
+
+| Setting | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `s3.endpoint_url` | `TESP_API_S3__ENDPOINT_URL` | empty (AWS S3) | Endpoint including the scheme, e.g. `https://s3.example.org` or `http://minio:9000` |
+| `s3.region` | `TESP_API_S3__REGION` | `us-east-1` | Region used for signing |
+| `s3.access_key_id` | `TESP_API_S3__ACCESS_KEY_ID` | empty | Access key. Empty means anonymous access (public buckets only) |
+| `s3.secret_access_key` | `TESP_API_S3__SECRET_ACCESS_KEY` | empty | Secret key; must be set together with the access key |
+| `s3.addressing_style` | `TESP_API_S3__ADDRESSING_STYLE` | `path` | `path` (`https://endpoint/bucket/key`, needed by most self-hosted stores), `virtual` (`https://bucket.endpoint/key`) or `auto` |
+| `s3.presign_expiry_seconds` | `TESP_API_S3__PRESIGN_EXPIRY_SECONDS` | `3600` | Lifetime of the download URLs (1 s to 7 days) |
+
+Put the keys in the environment or in `.secrets.toml` (git-ignored), not in `settings.toml`, e.g.
+```
+TESP_API_S3__ENDPOINT_URL=https://s3.example.org
+TESP_API_S3__ACCESS_KEY_ID=...
+TESP_API_S3__SECRET_ACCESS_KEY=...
+```
+
+How it works: when a task starts, `TESP API` turns each S3 input into a presigned `GET` URL (computed locally, no request
+to S3) and the Pulsar staging container downloads it with `curl`. The secret key never leaves `TESP API`. The presigned
+URLs are kept out of the job's shell trace and the `TESP API` debug log, so they are not stored with the task, but they are
+part of the job command Pulsar runs, so whoever operates Pulsar can see them until they expire. Keep
+`s3.presign_expiry_seconds` no longer than the time tasks may wait in Pulsar before staging starts.
+
+Limitations:
+- Legacy `s3://user:password@host:port/bucket/key` URLs (credentials or endpoint in the URL) are refused with
+  `400 Bad Request`, so credentials are never stored with a task. Tasks stored by older versions are not changed.
+- Keys are used literally, without percent-decoding. URLs with a query (e.g. `?versionId=`) or fragment are refused.
+- S3 `DIRECTORY` inputs and S3 outputs are not supported yet.
+- The endpoint must be reachable from the Pulsar staging containers. For HTTPS endpoints with a private CA, the
+  staging image must trust that CA.
+
+&nbsp;
 ### Configuring required services
 You can have a look at [./docker-compose.yaml](https://github.com/CESNET/tesp-api/blob/main/docker-compose.yaml) to see how
 the infrastructure for development should look like. Of course, you can configure those services in your preferred way if you are
@@ -185,6 +220,7 @@ which ports to be used etc. Following services are currently defined by [./docke
 - **tesp-api** - This project itself. Depends on mongodb
 - **tesp-db**  - [MongoDB](https://www.mongodb.com/) instance for persistence layer
 - **pulsar_rest** - `Pulsar` configured to use REST API with access to a docker instance thanks to [DIND](https://hub.docker.com/_/docker) (enabled with `--profile pulsar`).
+- **minio** - S3-compatible object store for the S3 smoke tests, on port 9000 with test-only credentials (enabled with `--profile pulsar`). `tesp-api` is configured to read S3 inputs from it.
 
 If you want HTTP/FTP/S3 data transfer services for testing, use the separate
 [docker/dts](docker/dts/README.md) compose stack.
