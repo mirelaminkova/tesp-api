@@ -314,6 +314,23 @@ def test_task_cancel():
     assert task_id
     _post_request(f"/v1/tasks/{task_id}:cancel")
     assert _wait_for_state(task_id, "CANCELED", 60)
+    # Polling notices the cancellation and cancels the Pulsar job too (issue #49); the old loop never did.
+    assert _wait_for_pulsar_cancel(task_id, 60)
+
+def _wait_for_pulsar_cancel(task_id, timeout):
+    """Whether tesp-api asked Pulsar to cancel the task's job (its DEBUG log names each Pulsar request)."""
+    for _ in range(timeout):
+        logs = subprocess.run(["docker", "logs", "tesp-api"], capture_output=True, text=True)
+        if f"/jobs/{task_id}/cancel>" in logs.stdout + logs.stderr:
+            return True
+        time.sleep(1)
+    return False
+
+# Runs longer than the legacy poll limit of the compose test profile (pulsar.status.max_polls = 5 at a 1 s interval),
+# which used to fail the task while its job kept running (issue #49).
+def test_task_outlives_legacy_poll_limit():
+    response = _test_simple("long_running.json", 120)
+    assert "finished" in _executor_logs(_gnv(response, "id"), "stdout")
 
 # Checks whether given task exceeds available resources.
 def test_resource_check_with_limits():
