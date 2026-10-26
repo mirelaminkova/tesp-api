@@ -10,7 +10,8 @@ from pymonad.maybe import Just, Nothing
 from bson.objectid import ObjectId
 from pymonad.promise import Promise, _Promise
 
-from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes, untraced
+from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes
+from tesp_api.utils.job_script import job_script
 from tesp_api.service.pulsar_service import pulsar_service
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.utils.functional import get_else_throw, maybe_of
@@ -214,9 +215,6 @@ async def handle_run_task(event: Event) -> None:
             stage_in_mount = payload['task_config']['inputs_directory']
             stage_in_confs = presign_s3_inputs(input_confs)
             stage_in_cmd = stage_in_command(stage_exec, resource_conf, stage_in_mount, stage_in_confs, CONTAINER_TYPE)
-            if any(conf.get('presigned') for conf in stage_in_confs):
-                # Presigned URLs must not show up in the `set -x` trace, which is stored as the task's stderr log.
-                stage_in_cmd = untraced(stage_in_cmd)
 
         # Main execution commands
         container_cmds = []
@@ -240,15 +238,9 @@ async def handle_run_task(event: Event) -> None:
                 bind_mount=payload['task_config'].get('inputs_directory') if CONTAINER_TYPE == "singularity" else None,
                 job_directory=payload['task_config'].get('job_directory') if CONTAINER_TYPE == "singularity" else None
             )
-            if any(conf.get('presigned') for conf in stage_out_confs):
-                # As for stage-in: presigned URLs and POST signatures must stay out of the stored `set -x` trace.
-                stage_out_cmd = untraced(stage_out_cmd)
 
-        # Combine all commands into a single string for Pulsar
-        executors_commands_joined_str = " && ".join(filter(None, container_cmds))
-        parts = ["set -xe", stage_in_cmd, executors_commands_joined_str, stage_out_cmd]
-        non_empty_parts = [p.strip() for p in parts if p and p.strip()]
-        run_command_str = " && ".join(non_empty_parts) if non_empty_parts else None
+        # Combine all commands into a single (untraced, see job_script) string for Pulsar
+        run_command_str = job_script(stage_in_cmd, *container_cmds, stage_out_cmd)
 
         command_start_time = datetime.datetime.now(datetime.timezone.utc)
         command_status: dict
