@@ -6,10 +6,12 @@ from typing import Dict, List, Tuple, Optional, Union
 
 from pymonad.maybe import Nothing, Maybe, Just
 
-from tesp_api.repository.model.task import TesTaskExecutor, TesTaskOutput, TesTaskIOType
+from tesp_api.repository.model.task import TesTaskExecutor, TesTaskOutput, TesTaskIOType, \
+    is_valid_env_name, is_valid_image, is_valid_mount_path
 from tesp_api.utils.functional import get_else_throw, maybe_of
 
 SHELL_PATTERN = re.compile(r"[|&;<>(){}$*?\"'\\]")
+SINGULARITY_ENV_PREFIXES = ("APPTAINERENV_", "SINGULARITYENV_")
 
 # Max bytes of a redirected executor stdout/stderr file echoed back to the job's own streams,
 # so it also lands in TesTaskExecutorLog.stdout/stderr (TES: "no guarantees are made about how
@@ -60,6 +62,8 @@ class ContainerCommandBuilder:
         return self
 
     def with_image(self, image: str):
+        if not is_valid_image(image):
+            raise ValueError(f"invalid image name: {image!r}")
         if self.container_type == "singularity":
             # If it's an absolute path, use as-is
             if os.path.isabs(image):
@@ -176,70 +180,68 @@ class ContainerCommandBuilder:
         return self
 
     def get_run_command(self) -> str:
-        # Common resource flags
-        cpu_flag = self._resource_cpu.maybe("", lambda cpu:
-        f"--cpus={cpu}" if self.container_type == "docker" else f"--cpu={cpu}")
+        """
+        The host command line that runs the container. Pulsar runs it through a shell, so every value is quoted
+        with ``shlex.quote`` and passed in ``--option=value`` form, which a value starting with ``-`` cannot break.
+        Raises ``ValueError`` for values that quoting cannot make safe (see ``tesp_api.repository.model.task``).
+        """
+        docker = self.container_type == "docker"
 
-        mem_flag = self._resource_mem.maybe("", lambda mem:
-        f"--memory={mem}g" if self.container_type == "docker" else f"--memory={mem}G")
+        # Common resource flags
+        cpu_flag = self._resource_cpu.maybe("", lambda cpu: f"--cpus={cpu}" if docker else f"--cpu={cpu}")
+        mem_flag = self._resource_mem.maybe("", lambda mem: f"--memory={mem}g" if docker else f"--memory={mem}G")
 
         # Environment variables
-        env_flags = []
-        for k, v in self._envs.items():
-            if self.container_type == "docker":
-                env_flags.append(f'-e {shlex.quote(k)}={shlex.quote(v)}')
-            else:
-                env_flags.append(f'--env {k}="{v}"')
+        for name in self._envs:
+            if not is_valid_env_name(name):
+                raise ValueError(f"invalid environment variable name: {name!r}")
+        if docker:
+            env_flags = [shlex.quote(f"--env={k}={v}") for k, v in self._envs.items()]
+            env_prefix = []
+        else:
+            # `singularity exec --env` parses its value as CSV and trims quotes, so values go through the
+            # environment instead. SingularityCE only reads SINGULARITYENV_; Apptainer reads both and logs a
+            # notice for SINGULARITYENV_ unless APPTAINERENV_ holds the same value (warnDeprecatedEnvUsage in
+            # apptainer internal/pkg/util/env/create.go).
+            env_flags = []
+            env_prefix = [f"{prefix}{k}={shlex.quote(v)}"
+                          for k, v in self._envs.items() for prefix in SINGULARITY_ENV_PREFIXES]
 
         # Work directory
         workdir_flag = self._workdir.maybe("", lambda w:
-        f'-w "{w}"' if self.container_type == "docker" else f'--pwd "{w}"')
+                                           shlex.quote(f"--workdir={w}" if docker else f"--pwd={w}"))
 
         # Image
-        image = self._image.maybe("", lambda i: i)
+        image = self._image.maybe("", shlex.quote)
 
         # Mounts
         mount_flags = []
-        mkdir_cmds = []  # for singularity pre-creation
+        mkdir_paths = []  # for singularity pre-creation
 
         # Handle explicit directories (Singularity only)
-        if self.container_type == "singularity":
-            for path in self._dirs_to_create:
-                mkdir_cmds.append(f'mkdir -p "{path}"')
+        if not docker:
+            mkdir_paths.extend(self._dirs_to_create)
 
-        # Handle mounts
-        if self.container_type == "docker":
-            for container_path, host_path in self._bind_mounts.items():
-                mount_flags.append(f'-v "{host_path}":"{container_path}"')
-            for container_path, volume_name in self._volumes.items():
-                mount_flags.append(f'-v "{volume_name}":"{container_path}"')
-        else:  # singularity
-            for container_path, host_path in self._bind_mounts.items():
-                mount_flags.append(f'-B "{host_path}":"{container_path}"')
-            for container_path, volume_name in self._volumes.items():
-                # Volumes are always directories, so we can auto-create them
-                mkdir_cmds.append(f'mkdir -p "{volume_name}"')
-                mount_flags.append(f'-B "{volume_name}":"{container_path}"')
+        mount_option = "--volume" if docker else "--bind"
+        for container_path, host_path in [*self._bind_mounts.items(), *self._volumes.items()]:
+            if not (is_valid_mount_path(container_path) and is_valid_mount_path(host_path)):
+                raise ValueError(f"invalid mount path: {host_path!r}:{container_path!r}")
+            mount_flags.append(shlex.quote(f"{mount_option}={host_path}:{container_path}"))
+        if not docker:
+            # Volumes are always directories, so we can auto-create them
+            mkdir_paths.extend(self._volumes.values())
+        mkdir_cmds = [f"mkdir -p -- {shlex.quote(str(path))}" for path in mkdir_paths]
 
         # Command
         command_str = self._command.maybe("", lambda cmd:
         " ".join(shlex.quote(arg) for arg in cmd) if isinstance(cmd, list) else cmd)
 
         # Build final command
-        if self.container_type == "docker":
-            return (
-                f"docker run {cpu_flag} {mem_flag} {workdir_flag} "
-                f"{' '.join(env_flags)} {' '.join(mount_flags)} "
-                f"{image} {command_str}"
-            ).strip()
-        else:  # singularity
-            mkdir_prefix = " && ".join(mkdir_cmds)
-            singularity_cmd = (
-                f"singularity exec {cpu_flag} {mem_flag} {workdir_flag} "
-                f"{' '.join(env_flags)} {' '.join(mount_flags)} "
-                f"{image} {command_str}"
-            ).strip()
-            return f"{mkdir_prefix} && {singularity_cmd}" if mkdir_prefix else singularity_cmd
+        # --no-eval: Apptainer otherwise shell-evaluates env values inside the container, unlike docker
+        runtime = "docker run" if docker else "singularity exec --no-eval"
+        container_cmd = " ".join(filter(None, [
+            *env_prefix, runtime, cpu_flag, mem_flag, workdir_flag, *env_flags, *mount_flags, image, command_str]))
+        return " && ".join([*mkdir_cmds, container_cmd])
 
 
 # Unified command functions

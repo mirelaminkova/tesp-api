@@ -233,6 +233,30 @@ def test_stderr():
     assert _read_uploaded("stderr-test") == "hello-world-stderr\n"
     assert "hello-world-stderr" in _executor_logs(_gnv(task, "id"), "stderr")
 
+# Executor env values reach the container literally: the host shell does not expand them, and
+# `singularity --env` would split values containing ',' or '=' and trim quotes.
+def test_env_values_are_not_expanded():
+    env = {"INJECT": "$(echo pwned)", "TICKS": "`echo pwned` $HOME", "CSV": 'a=1,b="2"'}
+    task = {
+        "executors": [{
+            "image": "ubuntu",
+            "command": ["sh", "-c", 'printf "[%s]\\n" "$INJECT" "$TICKS" "$CSV"'],
+            "env": env
+        }]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
+    stdout = _executor_logs(task_id, "stdout")
+    for value in env.values():
+        assert f"[{value}]" in stdout
+
+# Invalid executor env names are refused at task creation, naming the field.
+def test_invalid_env_name_rejected():
+    task = {"executors": [{"image": "ubuntu", "command": ["true"], "env": {"BAD;NAME": "x"}}]}
+    resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
+    assert resp.status_code == 400
+    assert "executors[0].env" in resp.text
+
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
     response = _test_simple("cancel.json", 60, "RUNNING")
