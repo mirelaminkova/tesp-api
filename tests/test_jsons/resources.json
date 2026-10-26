@@ -1,0 +1,12 @@
+{
+    "resources": {
+        "cpu_cores": 1,
+        "ram_gb": 0.5
+    },
+    "executors": [
+        {
+            "image": "ubuntu",
+            "command": ["echo", "done"]
+        }
+    ]
+}
