@@ -12,7 +12,7 @@ def test_http_url_parses():
     url = _Model(url="http://example.org:8080/path").url
     assert url.scheme == "http"
     assert url.host == "example.org"
-    assert url.port == "8080"
+    assert url.port == "8080"  # pydantic v1 keeps the port as a string
 
 
 def test_http_url_rejects_other_scheme():

@@ -1,6 +1,16 @@
 # Testing
 
-Integration tests for TESP-API. All tests run against a live TESP-API instance at `http://localhost:8080`.
+Tests for TESP-API come in two kinds:
+
+- **Unit tests** (`tests/unit/`) need no running services:
+
+  ```bash
+  python3 -m pytest tests/unit
+  ```
+
+- **Integration tests** (described below) run against a live TESP-API instance at `http://localhost:8080`.
+
+CI (`.github/workflows/ci.yaml`) runs both suites on every pull request and on pushes to `main`.
 
 ## Prerequisites
 

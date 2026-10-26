@@ -14,7 +14,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded PR runs; keep every run on main.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
 
@@ -44,7 +45,7 @@ jobs:
           python-version: "3.11"
 
       - name: install dependencies
-        run: pip install . pytest
+        run: pip install . "pytest>=7.1,<8"
 
       - name: run unit tests
         run: pytest tests/unit
@@ -65,7 +66,7 @@ jobs:
         run: docker compose --profile pulsar up -d --build
 
       - name: install test dependencies
-        run: pip install . pytest flask
+        run: pip install . "pytest>=7.1,<8" flask
 
       - name: wait for tesp-api
         run: |
@@ -77,6 +78,19 @@ jobs:
             sleep 5
           done
           echo "tesp-api did not answer on :8080 within 5 minutes" >&2
+          exit 1
+
+      - name: wait for pulsar
+        run: |
+          for _ in $(seq 1 60); do
+            # Any HTTP response means Pulsar is listening.
+            if docker compose --profile pulsar exec -T pulsar_rest curl -sS -o /dev/null http://localhost:8913/; then
+              echo "pulsar is up"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "pulsar did not answer on :8913 within 5 minutes" >&2
           exit 1
 
       - name: start upload server
@@ -97,7 +111,7 @@ jobs:
         run: pytest tests/smoke_tests.py
 
       - name: dump logs on failure
-        if: failure()
+        if: failure() || cancelled()
         run: |
           docker compose --profile pulsar ps -a
           docker compose --profile pulsar logs --no-color
