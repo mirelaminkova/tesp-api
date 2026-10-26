@@ -4,6 +4,16 @@ pulsar.url = "http://localhost:8913"
 pulsar.status.poll_interval = 4
 pulsar.status.max_polls = 400
 pulsar.client_timeout = 30
+# Per-job DRMAA native specification built from the task's TES resources, used when Pulsar submits to a batch system
+# through a DRMAA manager (e.g. SLURM) that has no native_specification of its own. Each template is used only when the
+# task requests that resource. Placeholders: {cpu_cores}, {ram_gb}, {ram_mb} (ram_gb in whole MiB, rounded up).
+pulsar.native_specification.cpu_cores = ""  # e.g. "--cpus-per-task={cpu_cores}" for SLURM
+pulsar.native_specification.ram_gb = ""     # e.g. "--mem={ram_mb}" for SLURM
+
+# Put TES resources (cpu_cores, ram_gb) on the container command line as --cpus/--memory:
+# "auto" for docker only, "always" for docker and singularity, "never" for neither. Apptainer needs a usable cgroups
+# manager (cgroups v2 with systemd or delegation) for these flags and fails the task without one.
+container.resource_limits = "auto"
 
 logging.level = "DEBUG"
 logging.output_json = false

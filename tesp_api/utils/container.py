@@ -8,6 +8,7 @@ from pymonad.maybe import Nothing, Maybe, Just
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskOutput, TesTaskIOType, \
     is_valid_env_name, is_valid_image, is_valid_mount_path
+from tesp_api.service.resources import positive, ram_mib
 from tesp_api.utils.functional import get_else_throw, maybe_of
 
 SHELL_PATTERN = re.compile(r"[|&;<>(){}$*?\"'\\]")
@@ -187,9 +188,10 @@ class ContainerCommandBuilder:
         """
         docker = self.container_type == "docker"
 
-        # Common resource flags
-        cpu_flag = self._resource_cpu.maybe("", lambda cpu: f"--cpus={cpu}" if docker else f"--cpu={cpu}")
-        mem_flag = self._resource_mem.maybe("", lambda mem: f"--memory={mem}g" if docker else f"--memory={mem}G")
+        # Resource limits; docker and apptainer take the same flags. Whether they are wanted at all is decided by the
+        # caller (container.resource_limits, see tesp_api.service.resources).
+        cpu_flag = self._resource_cpu.map(positive).maybe("", lambda cpu: f"--cpus={cpu}" if cpu else "")
+        mem_flag = self._resource_mem.map(positive).maybe("", lambda mem: f"--memory={ram_mib(mem)}m" if mem else "")
 
         # Environment variables
         for name in self._envs:

@@ -12,6 +12,7 @@ from pymonad.promise import Promise, _Promise
 
 from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes, untraced
 from tesp_api.service.pulsar_service import pulsar_service
+from tesp_api.service.resources import get_resource_config
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.service.event_handler import Event, local_handler
@@ -178,6 +179,12 @@ async def handle_run_task(event: Event) -> None:
     output_confs: List[dict] = payload['output_confs']
     pulsar_operations: PulsarRestOperations = payload['pulsar_operations']
 
+    # TES resources go to the batch system (native specification) and, per container.resource_limits, onto the
+    # container command lines.
+    resource_config = get_resource_config()
+    submit_params = resource_config.submit_params(resource_conf)
+    resource_conf = resource_config.container_resource_conf(resource_conf, CONTAINER_TYPE)
+
     run_command_str = None
     command_start_time = datetime.datetime.now(datetime.timezone.utc)
 
@@ -258,7 +265,7 @@ async def handle_run_task(event: Event) -> None:
             command_status = {'stdout': '', 'stderr': 'No commands to run.', 'returncode': 0}
         else:
             logger.debug(f"Submitting job to Pulsar for task {task_id}: {redact_presigned_urls(run_command_str)}")
-            await pulsar_operations.run_job(task_id, run_command_str)
+            await pulsar_operations.run_job(task_id, run_command_str, submit_params)
             command_status = await pulsar_operations.job_status_complete(str(task_id))
 
         command_end_time = datetime.datetime.now(datetime.timezone.utc)

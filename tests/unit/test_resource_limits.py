@@ -139,6 +139,12 @@ def test_invalid_template_is_rejected(template):
 
 # --- Submit parameters reach Pulsar ---------------------------------------------------------------------------------
 
+def _run(promise):
+    async def wait():
+        return await promise
+    return asyncio.run(wait())
+
+
 def _record_rest_requests(ops: PulsarRestOperations) -> list:
     calls = []
 
@@ -152,7 +158,7 @@ def _record_rest_requests(ops: PulsarRestOperations) -> list:
 def test_rest_submit_sends_params():
     ops = PulsarRestOperations(None, "http://pulsar", 1, 1)
     calls = _record_rest_requests(ops)
-    asyncio.run(ops.run_job("job", "true", {'native_specification': "--cpus-per-task=2"}))
+    _run(ops.run_job("job", "true", {'native_specification': "--cpus-per-task=2"}))
     assert calls[0]['path'] == "/jobs/job/submit"
     assert calls[0]['params']['command_line'] == "true"
     assert json.loads(calls[0]['params']['params']) == {'native_specification': "--cpus-per-task=2"}
@@ -161,7 +167,7 @@ def test_rest_submit_sends_params():
 def test_rest_submit_without_params():
     ops = PulsarRestOperations(None, "http://pulsar", 1, 1)
     calls = _record_rest_requests(ops)
-    asyncio.run(ops.run_job("job", "true"))
+    _run(ops.run_job("job", "true"))
     assert calls[0]['params'] == {'command_line': "true"}
 
 
@@ -173,6 +179,6 @@ def test_amqp_submit_sends_params(submit_params):
     async def fake_send(message, routing_key="pulsar.queue"):
         messages.append(message)
     ops._send_message = fake_send
-    asyncio.run(ops.run_job("job", "true", submit_params))
+    _run(ops.run_job("job", "true", submit_params))
     assert messages[0]['command_line'] == "true"
     assert messages[0].get('submit_params', {}) == submit_params
