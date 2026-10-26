@@ -204,7 +204,8 @@ def test_redact_presigned_post_fields():
     redacted = redact_presigned_urls(script)
     assert signature not in redacted
     assert ACCESS_KEY not in redacted
-    assert "x-amz-credential=REDACTED" in redacted
+    # The whole field goes, its name too, so a log scan for the names finds only unredacted ones.
+    assert "x-amz-credential" not in redacted and "policy=" not in redacted
 
 
 # --- stage-out script ---------------------------------------------------------------
