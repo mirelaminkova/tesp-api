@@ -44,4 +44,10 @@ def logg_configure():
                 visited.add(subsequent)
             logging.getLogger(name).handlers = [intercept_handler]
 
-    logger.configure(handlers=[{"sink": sys.stdout, "serialize": properties.logging.output_json}])
+    # botocore logs the canonical request and signature of every presigned S3 URL at DEBUG.
+    for name in ("botocore", "aiobotocore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+    # diagnose=False: tracebacks must not show local variables, which may hold presigned URLs or credentials.
+    logger.configure(handlers=[{"sink": sys.stdout, "serialize": properties.logging.output_json,
+                                "diagnose": False, "backtrace": False}])

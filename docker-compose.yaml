@@ -7,6 +7,11 @@ services:
     image: tesp-api
     environment:
       - CONTAINER_TYPE=singularity  # Set to "docker", "singularity", or "both"
+      # S3 inputs (s3://bucket/key) are read from the MinIO test service below (profile "pulsar").
+      # The endpoint must be reachable from the staging containers that Pulsar starts.
+      - TESP_API_S3__ENDPOINT_URL=http://172.17.0.1:9000
+      - TESP_API_S3__ACCESS_KEY_ID=tesp-test
+      - TESP_API_S3__SECRET_ACCESS_KEY=tesp-test-secret  # local test credentials only
     container_name: tesp-api
     privileged: true
     ports:
@@ -48,6 +53,19 @@ services:
       - ./docker/pulsar_rest/app.yml:/opt/pysetup/app.yml
       - /opt/pysetup/files/staging/:/opt/pysetup/files/staging/
       - /var/run/docker.sock:/var/run/docker.sock
+
+  # S3-compatible object store for the smoke tests (tests/smoke_tests.py::test_s3_input).
+  # minio/minio is no longer published on Docker Hub; this is Bitnami's frozen MinIO build.
+  minio:
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
+    profiles: ["pulsar"]
+    container_name: tesp-minio
+    environment:
+      - MINIO_ROOT_USER=tesp-test
+      - MINIO_ROOT_PASSWORD=tesp-test-secret  # local test credentials only
+      - MINIO_DEFAULT_BUCKETS=tesp-test
+    ports:
+      - "172.17.0.1:9000:9000"  # docker bridge only: reachable by staging containers, not from the network
 
 # Some cloud providers may require a lower MTU!
 networks:

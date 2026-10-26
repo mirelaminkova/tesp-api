@@ -282,3 +282,56 @@ def cleanup_uploaded_data():
         print(f"Failed to remove sleep containers: {e}")
 
 
+# S3 inputs (issue #3). MinIO runs in the compose "pulsar" profile; tesp-api gets the endpoint and
+# credentials through TESP_API_S3__* in docker-compose.yaml. The URLs in the task carry no credentials.
+S3_TEST_ENDPOINT = "http://172.17.0.1:9000"  # MinIO listens on the docker bridge only
+S3_TEST_ACCESS_KEY = "tesp-test"
+S3_TEST_SECRET_KEY = "tesp-test-secret"  # local MinIO test credentials, same as in docker-compose.yaml
+S3_TEST_BUCKET = "tesp-test"
+
+def _s3_test_client():
+    import botocore.session
+    from botocore.config import Config
+    return botocore.session.get_session().create_client(
+        "s3", endpoint_url=S3_TEST_ENDPOINT, region_name="us-east-1",
+        aws_access_key_id=S3_TEST_ACCESS_KEY, aws_secret_access_key=S3_TEST_SECRET_KEY,
+        config=Config(s3={"addressing_style": "path"}))
+
+def _s3_put_test_object(key, body):
+    client = _s3_test_client()
+    for _ in range(60):  # MinIO may still be starting; compose creates the bucket
+        try:
+            client.head_bucket(Bucket=S3_TEST_BUCKET)
+            break
+        except Exception:
+            time.sleep(2)
+    else:
+        raise RuntimeError(f"MinIO bucket {S3_TEST_BUCKET} not reachable at {S3_TEST_ENDPOINT}")
+    client.put_object(Bucket=S3_TEST_BUCKET, Key=key, Body=body)
+
+# Downloads a plain s3://bucket/key input using the server-side S3 settings.
+def test_s3_input():
+    content = f"hello from s3 {time.time_ns()}"
+    _s3_put_test_object("smoke/input.txt", content.encode())
+    task = {
+        "inputs": [{"path": "/data/s3_input", "url": f"s3://{S3_TEST_BUCKET}/smoke/input.txt", "type": "FILE"}],
+        # The object has no trailing newline; grep -x still matches its single line.
+        "executors": [{"image": "ubuntu", "command": ["grep", "-qx", content, "/data/s3_input"]}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
+
+    stored = json.dumps(_get_request(f"/v1/tasks/{task_id}?view=FULL"))
+    for leaked in (S3_TEST_SECRET_KEY, "X-Amz-Signature", "X-Amz-Credential"):
+        assert leaked not in stored
+
+# Legacy s3://user:pass@host:port/bucket/key URLs are refused and not stored.
+def test_s3_legacy_url_rejected():
+    task = {
+        "inputs": [{"path": "/data/in", "url": "s3://user:legacy-password@172.17.0.1:9000/tesp-test/in.txt"}],
+        "executors": [{"image": "ubuntu", "command": ["true"]}]
+    }
+    resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
+    assert resp.status_code == 400
+    assert "inputs[0].url" in resp.text
+    assert "legacy-password" not in resp.text
