@@ -11,6 +11,11 @@ from tesp_api.utils.functional import get_else_throw, maybe_of
 
 SHELL_PATTERN = re.compile(r"[|&;<>(){}$*?\"'\\]")
 
+# Max bytes of a redirected executor stdout/stderr file echoed back to the job's own streams,
+# so it also lands in TesTaskExecutorLog.stdout/stderr (TES: "no guarantees are made about how
+# much of the stream is captured").
+STDIO_LOG_TAIL_BYTES = 64 * 1024
+
 class ContainerCommandBuilder:
     def __init__(self, container_type: str) -> None:
         self.container_type = container_type
@@ -79,9 +84,15 @@ class ContainerCommandBuilder:
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
-        
+
         if not command:
             self._command = Nothing
+            return self
+
+        # Stream redirections need a shell inside the container; the argv is passed as
+        # positional parameters ("$@") so it is never interpreted by that shell.
+        if self._has_stdio():
+            self._command = Just(["sh", "-c", self._stdio_script(), "sh", *map(str, command)])
             return self
 
         # Check if already wrapped in shell
@@ -92,18 +103,10 @@ class ContainerCommandBuilder:
         # Wrap in shell if needed
         if self.requires_shell(command) or self.container_type == "singularity":
             shell_cmd = " ".join(shlex.quote(str(arg)) for arg in command)
-            shell_cmd = self._escape_redirections(
-                shell_cmd,
-                self._stdin,
-                self._stdout,
-                self._stderr
-            )
             self._command = Just(["sh", "-c", shell_cmd])
         else:
-            cmd = list(map(str, command))
-            cmd = self._add_redirections(cmd)
-            self._command = Just(cmd)
-            
+            self._command = Just(list(map(str, command)))
+
         return self
 
     def _is_shell_wrapped(self, command) -> bool:
@@ -117,34 +120,24 @@ class ContainerCommandBuilder:
             for arg in command
         )
 
-    def _escape_redirections(self, cmd: str, stdin, stdout, stderr) -> str:
-        redirections = [
-            ('<', stdin),
-            ('>', stdout),
-            ('2>', stderr),
-        ]
-        for op, val in redirections:
-            if val and val != Nothing:
-                path = val.maybe("", lambda x: x)
-                if path:
-                    cmd += f" {op} {shlex.quote(path)}"
-        return cmd
+    def _has_stdio(self) -> bool:
+        return any(stream.maybe("", lambda x: x) for stream in (self._stdin, self._stdout, self._stderr))
 
-    def _add_redirections(self, cmd: List[str]) -> List[str]:
-        redirections = []
-        if self._stdin != Nothing:
-            path = self._stdin.maybe("", lambda x: x)
-            if path:
-                redirections.extend(["<", path])
-        if self._stdout != Nothing:
-            path = self._stdout.maybe("", lambda x: x)
-            if path:
-                redirections.extend([">", path])
-        if self._stderr != Nothing:
-            path = self._stderr.maybe("", lambda x: x)
-            if path:
-                redirections.extend(["2>", path])
-        return cmd + redirections
+    def _stdio_script(self) -> str:
+        stdin = self._stdin.maybe("", lambda x: x)
+        stdout = self._stdout.maybe("", lambda x: x)
+        stderr = self._stderr.maybe("", lambda x: x)
+
+        redirections = [f"{op} {shlex.quote(path)}" for op, path in
+                        (("<", stdin), (">", stdout), ("2>", stderr)) if path]
+        script = [" ".join(['"$@"', *redirections]), "rc=$?"]
+        # Echo the tail of redirected files to the job's streams so ExecutorLog still gets them.
+        if stdout:
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} {shlex.quote(stdout)} 2>/dev/null")
+        if stderr:
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} {shlex.quote(stderr)} >&2 2>/dev/null")
+        script.append("exit $rc")
+        return "; ".join(script)
 
     def reset(self) -> None:
         self._resource_cpu = Nothing
