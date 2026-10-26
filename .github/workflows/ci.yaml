@@ -328,20 +328,27 @@ jobs:
           docker compose --project-directory "$GITHUB_WORKSPACE" --profile pulsar logs --no-color > compose.log 2>&1 || true
           # The TES view of every task Nextflow submitted (stored s3:// URLs, states, executor logs).
           curl -fsS "http://localhost:8080/v1/tasks?view=FULL" > tasks.json 2>&1 || true
-          # Never upload credentials or presigned URLs: fail instead and name the files.
-          # -a: Docker logs may hold binary bytes, which -I or the default would skip.
+          # Never upload credentials or presigned URLs. A leak fails the job (and names the files);
+          # the leaking lines are then replaced so the rest of the logs can still be uploaded.
+          # -a and LC_ALL=C: Docker logs may hold binary bytes, which grep would otherwise skip.
           pattern='x-amz-signature|x-amz-credential|x-amz-security-token|awsaccesskeyid|tesp-test-secret'
           status=0
-          LC_ALL=C grep -aEilr "$pattern" . || status=$?
-          if [ "$status" -eq 0 ]; then
-            echo "::error title=Nextflow e2e::Logs contain credentials or presigned URLs (files above); not uploading them."
-            echo "clean=false" >> "$GITHUB_OUTPUT"
-            exit 1
-          elif [ "$status" -ge 2 ]; then
+          leaks="$(LC_ALL=C grep -aEilr "$pattern" .)" || status=$?
+          if [ "$status" -ge 2 ]; then
             echo "::error title=Nextflow e2e::Log scan failed; not uploading the logs."
             exit 1
           fi
+          for f in $leaks; do
+            n="$(LC_ALL=C grep -aEic "$pattern" "$f")"
+            echo "::error title=Nextflow e2e::$f has $n lines with credentials or presigned URLs; they are replaced in the artefact."
+            LC_ALL=C sed -Ei "/$pattern/I c [line removed by CI: credentials or presigned URL]" "$f"
+          done
+          if LC_ALL=C grep -aEilr "$pattern" .; then
+            echo "::error title=Nextflow e2e::Redaction failed; not uploading the logs."
+            exit 1
+          fi
           echo "clean=true" >> "$GITHUB_OUTPUT"
+          [ -z "$leaks" ]
 
       - name: upload logs
         if: (failure() || cancelled()) && steps.logs.outputs.clean == 'true'

@@ -86,7 +86,7 @@ NXF_VER=25.10.8 nextflow run "$REPO/tests/e2e/nextflow/main.nf" -c "$REPO/tests/
 cat results/shout.txt   # HELLO FROM TESP-API
 ```
 
-The config reads `TES_ENDPOINT` (default `http://localhost:8080`), `S3_ENDPOINT` (default `http://172.17.0.1:9000`, the address TESP-API presigns against) and `NXF_E2E_WORK_DIR` (default `s3://nextflow-e2e/work`). CI runs the same pipeline in the `nextflow-e2e` job and also checks that TESP-API ran both tasks. It scans the Nextflow log, the compose logs and the `GET /v1/tasks?view=FULL` dump for credentials and presigned URLs (a match fails the job), and on failure uploads them as the `nextflow-e2e-logs` artefact. The step output in the job log is not scanned.
+The config reads `TES_ENDPOINT` (default `http://localhost:8080`), `S3_ENDPOINT` (default `http://172.17.0.1:9000`, the address TESP-API presigns against) and `NXF_E2E_WORK_DIR` (default `s3://nextflow-e2e/work`). CI runs the same pipeline in the `nextflow-e2e` job and also checks that TESP-API ran both tasks. It scans the Nextflow log, the compose logs and the `GET /v1/tasks?view=FULL` dump for credentials and presigned URLs. A match fails the job; the matching lines are replaced, and on failure the logs are uploaded as the `nextflow-e2e-logs` artefact. The step output in the job log is not scanned.
 
 ## Platform Notes
 
