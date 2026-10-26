@@ -1,5 +1,6 @@
 """Presigned S3 URLs and POST policies must not reach tesp-api's log or exception messages (issue #39)."""
 import asyncio
+import json
 import os
 import subprocess
 
@@ -17,6 +18,7 @@ from tesp_api.service.client.client_s3 import S3Config, presign_get_url, presign
 from tesp_api.service.pulsar_operations import PulsarLayerConnectionError, PulsarOperationsError, \
     PulsarRestOperations, log_pulsar_request
 from tesp_api.utils.container import stage_out_script
+from tesp_api.utils.job_script import job_script
 from tesp_api.utils.types import S3Url
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -49,7 +51,7 @@ def _command_line() -> str:
     get_url = presign_get_url(_s3("s3://my-bucket/work/in.txt"), SIGNED)
     staged = presign_s3_outputs([{"container_path": "/data/results", "url": _s3("s3://my-bucket/work/results"),
                                   "volume_name": "vol-1-data", "type": TesTaskIOType.DIRECTORY}], SIGNED)
-    return f"set -xe && curl -fsSg -o /data/in.txt '{get_url}' && {stage_out_script(staged)}"
+    return job_script(f"curl -fsSg -o /data/in.txt '{get_url}'", stage_out_script(staged))
 
 
 def _assert_clean(text: str):
@@ -74,7 +76,7 @@ def test_redacts_get_url_and_post_fields():
     _assert_clean(redacted)
     assert "https://s3.example.org/my-bucket/work/in.txt?" in redacted
     assert "X-Amz-Expires=" in redacted  # parameters that are not secret stay
-    assert redacted.startswith("set -xe && curl -fsSg -o /data/in.txt '")
+    assert redacted.startswith("set -e && curl -fsSg -o /data/in.txt '")
 
 
 def test_redacts_url_encoded_command_line():
@@ -83,7 +85,7 @@ def test_redacts_url_encoded_command_line():
     assert "%3D" in str(url) and ACCESS_KEY in str(url)
     redacted = redact_presigned_urls(str(url))
     _assert_clean(redacted)
-    assert redacted.startswith("http://pulsar:8913/jobs/abc/submit?command_line=set+-xe")
+    assert redacted.startswith("http://pulsar:8913/jobs/abc/submit?command_line=set+-e")
 
 
 TOKENS_AND_POLICIES = [
@@ -111,7 +113,7 @@ async def _with_pulsar_stub(handler, scenario):
     received = []
 
     async def submit(request):
-        received.append(request.query.get("command_line"))
+        received.append(dict(request.query))
         return await handler(request)
 
     app = web.Application()
@@ -129,22 +131,25 @@ async def _with_pulsar_stub(handler, scenario):
     return received
 
 
-def test_request_log_has_path_but_no_command_line(capsys):
+def test_request_log_has_path_but_no_query(capsys):
     logg_configure()
     command = _command_line()
+    submit_params = {"native_specification": "--mem=2048 --cpus-per-task=2"}
 
     async def ok(request):
         return web.Response(body=b"")
 
     async def scenario(operations, received):
-        await operations.run_job("abc", command)
+        await operations.run_job("abc", command, submit_params)
 
-    received = asyncio.run(_with_pulsar_stub(ok, scenario))
-    assert received == [command]  # Pulsar still gets the whole command line
+    [query] = asyncio.run(_with_pulsar_stub(ok, scenario))
+    assert query["command_line"] == command  # Pulsar still gets the whole command line and the submit params
+    assert json.loads(query["params"]) == submit_params
     out = capsys.readouterr().out
     assert "/jobs/abc/submit" in out
     assert "POST" in out
-    assert "command_line" not in out
+    for part in ("command_line", "native_specification", "--mem"):
+        assert part not in out
     _assert_clean(out)
 
 
@@ -184,7 +189,7 @@ def test_wrapped_operation_errors_are_redacted(capsys):
         except ValueError as cause:
             PulsarRestOperations._reraise_custom(cause)
     except PulsarOperationsError as error:
-        assert "ValueError: unexpected answer for set -xe" in str(error)  # the wrapped error is hidden from tracebacks
+        assert "ValueError: unexpected answer for set -e" in str(error)  # the wrapped error is hidden from tracebacks
         _assert_clean(str(error))
         logger.opt(exception=True).error(f"Pulsar operations error [msg: {error}]")
     _assert_clean(capsys.readouterr().out)
