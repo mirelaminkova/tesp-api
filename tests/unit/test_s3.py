@@ -1,4 +1,5 @@
 """Unit tests for plain ``s3://bucket/key`` inputs with server-side S3 settings (issue #3)."""
+import json
 import os
 import subprocess
 
@@ -88,8 +89,8 @@ def test_validation_errors_do_not_echo_legacy_secrets():
     with pytest.raises(pydantic.ValidationError) as error:
         _task("s3://AKIA:secret/with-slash@host:9000/bucket/key")
     redacted = redact_validation_errors(error.value.errors())
-    assert redacted and all(e["loc"] == ("inputs", 0, "url") for e in redacted)
-    assert "with-slash" not in repr(redacted)
+    assert redacted and all(e["loc"] == ["inputs", 0, "url"] for e in redacted)
+    assert "with-slash" not in json.dumps(redacted)  # also checks that the errors are JSON serialisable
 
 
 def test_legacy_s3_urls_are_reported_by_field_without_echoing_them():
