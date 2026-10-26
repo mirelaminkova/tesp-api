@@ -164,10 +164,40 @@ def test_inputs():
 def test_dir_input():
     assert _test_simple("dir-io.json", 120)
 
-#def test_outputs():
-    # Tests S3 and FTP upload and download.
-    #jsons = ["outputs-prepare", "outputs-prepare-check", "outputs-test", "outputs-test-check"]
-    #assert _test_sequence_simple(jsons, 180)
+# FILE and DIRECTORY outputs uploaded over HTTP (multipart POST to tests/upload_server.py), plus missing outputs,
+# which are skipped: TES has no "optional" flag for outputs, and clients such as Nextflow check for missing files
+# themselves. Directory outputs keep their structure below the upload root.
+def test_outputs():
+    token = f"http-{time.time_ns()}"
+    upload_url = "http://172.17.0.1:5000/upload"
+    script = (
+        "mkdir -p /data/http_out/results/outputs_http/sub"
+        f" && echo file-{token} > /data/http_out/outputs_http_file.txt"
+        f" && echo top-{token} > /data/http_out/results/outputs_http/top.txt"
+        f" && echo nested-{token} > /data/http_out/results/outputs_http/sub/nested.txt"
+    )
+    task = {
+        "outputs": [
+            {"path": "/data/http_out/outputs_http_file.txt", "url": upload_url, "type": "FILE"},
+            {"path": "/data/http_out/results", "url": upload_url, "type": "DIRECTORY"},
+            {"path": "/data/http_out/outputs_http_missing.txt", "url": upload_url, "type": "FILE"},
+            {"path": "/data/http_out/outputs_http_missing_dir", "url": upload_url, "type": "DIRECTORY"},
+        ],
+        "executors": [{"image": "ubuntu", "command": ["sh", "-c", script]}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
+
+    uploaded = f"{script_directory}/uploaded_data"
+    expected = {
+        "outputs_http_file.txt": f"file-{token}\n",
+        "outputs_http/top.txt": f"top-{token}\n",
+        "outputs_http/sub/nested.txt": f"nested-{token}\n",
+    }
+    for name, content in expected.items():
+        with open(f"{uploaded}/{name}") as f:
+            assert f.read() == content, name
+    assert not os.path.exists(f"{uploaded}/outputs_http_missing.txt")
 
 # Downloads and copies file to the shared volume and displays its content with two separate executors.
 def test_volumes():
@@ -269,17 +299,24 @@ def _s3_test_client():
         aws_access_key_id=S3_TEST_ACCESS_KEY, aws_secret_access_key=S3_TEST_SECRET_KEY,
         config=Config(s3={"addressing_style": "path"}))
 
-def _s3_put_test_object(key, body):
+def _s3_ready_test_client():
     client = _s3_test_client()
     for _ in range(60):  # MinIO may still be starting; compose creates the bucket
         try:
             client.head_bucket(Bucket=S3_TEST_BUCKET)
-            break
+            return client
         except Exception:
             time.sleep(2)
-    else:
-        raise RuntimeError(f"MinIO bucket {S3_TEST_BUCKET} not reachable at {S3_TEST_ENDPOINT}")
-    client.put_object(Bucket=S3_TEST_BUCKET, Key=key, Body=body)
+    raise RuntimeError(f"MinIO bucket {S3_TEST_BUCKET} not reachable at {S3_TEST_ENDPOINT}")
+
+def _s3_put_test_object(key, body):
+    _s3_ready_test_client().put_object(Bucket=S3_TEST_BUCKET, Key=key, Body=body)
+
+def _assert_no_s3_secrets_stored(task_id):
+    stored = json.dumps(_get_request(f"/v1/tasks/{task_id}?view=FULL"))
+    for leaked in (S3_TEST_SECRET_KEY, "X-Amz-Signature", "X-Amz-Credential", "x-amz-signature",
+                   "x-amz-credential"):
+        assert leaked not in stored
 
 # Downloads a plain s3://bucket/key input using the server-side S3 settings.
 def test_s3_input():
@@ -293,9 +330,7 @@ def test_s3_input():
     task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
     assert _wait_for_state(task_id, "COMPLETE", 120)
 
-    stored = json.dumps(_get_request(f"/v1/tasks/{task_id}?view=FULL"))
-    for leaked in (S3_TEST_SECRET_KEY, "X-Amz-Signature", "X-Amz-Credential"):
-        assert leaked not in stored
+    _assert_no_s3_secrets_stored(task_id)
 
 # Legacy s3://user:pass@host:port/bucket/key URLs are refused and not stored.
 def test_s3_legacy_url_rejected():
@@ -307,3 +342,40 @@ def test_s3_legacy_url_rejected():
     assert resp.status_code == 400
     assert "inputs[0].url" in resp.text
     assert "legacy-password" not in resp.text
+
+# FILE (presigned PUT) and DIRECTORY (presigned POST policy limited to the key prefix) outputs to plain s3://bucket/key
+# URLs, plus missing outputs, which are skipped. Directory outputs keep their structure below the URL prefix.
+def test_s3_outputs():
+    client = _s3_ready_test_client()
+    token = f"s3-{time.time_ns()}"
+    prefix = f"smoke/outputs/{token}"
+    script = (
+        "mkdir -p '/data/s3_out/results/sub dir'"
+        f" && echo file-{token} > /data/s3_out/result.txt"
+        f" && echo top-{token} > /data/s3_out/results/top.txt"
+        f" && echo nested-{token} > '/data/s3_out/results/sub dir/nested.txt'"
+    )
+    task = {
+        "outputs": [
+            {"path": "/data/s3_out/result.txt", "url": f"s3://{S3_TEST_BUCKET}/{prefix}/result.txt", "type": "FILE"},
+            {"path": "/data/s3_out/results", "url": f"s3://{S3_TEST_BUCKET}/{prefix}/results", "type": "DIRECTORY"},
+            {"path": "/data/s3_out/missing.txt", "url": f"s3://{S3_TEST_BUCKET}/{prefix}/missing.txt", "type": "FILE"},
+            {"path": "/data/s3_out/missing_dir", "url": f"s3://{S3_TEST_BUCKET}/{prefix}/missing_dir",
+             "type": "DIRECTORY"},
+        ],
+        "executors": [{"image": "ubuntu", "command": ["sh", "-c", script]}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
+
+    listed = client.list_objects_v2(Bucket=S3_TEST_BUCKET, Prefix=f"{prefix}/")
+    objects = {
+        obj["Key"]: client.get_object(Bucket=S3_TEST_BUCKET, Key=obj["Key"])["Body"].read().decode()
+        for obj in listed.get("Contents", [])
+    }
+    assert objects == {
+        f"{prefix}/result.txt": f"file-{token}\n",
+        f"{prefix}/results/top.txt": f"top-{token}\n",
+        f"{prefix}/results/sub dir/nested.txt": f"nested-{token}\n",
+    }
+    _assert_no_s3_secrets_stored(task_id)
