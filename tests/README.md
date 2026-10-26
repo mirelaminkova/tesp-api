@@ -53,6 +53,23 @@ python3 -m pytest tests/unit -v
 python3 -m pytest tests/load_stress_test.py -v
 ```
 
+### Large-file tests (issue #6)
+
+`tests/large_file_tests.py` moves a 1 GiB generated file through S3 (MinIO) and HTTP inputs and outputs, with
+tesp-api's memory capped at 512 MiB, so a transfer that buffered the file in tesp-api would get it OOM-killed. The tests
+fail on purpose if the cap is missing. Start the stack with the override (CI starts the whole integration stack this
+way) and the upload server:
+
+```bash
+docker compose -f docker-compose.yaml -f tests/compose.mem-limit.yaml --profile pulsar up -d --build
+python3 tests/upload_server.py &
+python3 -m pytest -s tests/large_file_tests.py -v
+```
+
+`LARGE_FILE_MIB` sets the file size (default 1024; it must stay above the cap). A run needs about 8 GiB of free disk
+per GiB of file at its peak: the generated file in `tests/uploaded_data/`, objects in MinIO, and the staged inputs and
+outputs, which Pulsar keeps in `/opt/pysetup/files/staging/` after a task completes.
+
 ### GA4GH TES conformance suite
 
 With the stack up (see Prerequisites), run [ga4gh/openapi-test-runner](https://github.com/ga4gh/openapi-test-runner) against it:
