@@ -1,2 +1,4 @@
 docker/*/data/*
 docker/*/logs/*
+# Conformance suite workdir (tests/conformance.sh)
+.conformance/
