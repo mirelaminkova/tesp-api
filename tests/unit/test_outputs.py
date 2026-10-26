@@ -398,3 +398,71 @@ def test_stage_out_command_contains_no_s3_url_or_secret():
         # The script survives the extra quoting of the container command line.
         script = shlex.split(command)[-1]
         assert script == stage_out_script(staged)
+
+
+# --- review round: validation and robustness ------------------------------------
+
+from tesp_api.repository.model.task import find_unsupported_outputs  # noqa: E402
+
+
+@pytest.mark.parametrize("output, field", [
+    ({"path": "/data/*.bam", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
+    ({"path": "/data/sample?.txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
+    ({"path": "/data/[ab].txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
+    ({"path": "data/out.txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
+    ({"path": "/data/out", "path_prefix": "/data", "url": UPLOAD_URL, "type": "DIRECTORY"},
+     "outputs[0].path_prefix"),
+])
+def test_unsupported_output_paths_are_reported(output, field):
+    assert find_unsupported_outputs(_task([output])) == [field]
+
+
+def test_plain_output_paths_are_supported():
+    assert find_unsupported_outputs(_task([
+        {"path": "/data/out file.txt", "url": UPLOAD_URL, "type": "FILE"},
+        {"path": "/data/results", "url": "s3://bucket/results", "type": "DIRECTORY"},
+    ])) == []
+
+
+def test_s3_directory_output_key_with_filename_variable_is_reported():
+    # S3 POST replaces ${filename} in the key field.
+    task = _task([{"path": "/data/out", "url": "s3://bucket/a${filename}", "type": "DIRECTORY"}])
+    assert find_unsupported_s3_urls(task) == ["outputs[0].url"]
+
+
+def test_redaction_hides_policy_which_contains_the_access_key_id():
+    staged = presign_s3_outputs(
+        [_output_conf(_s3("s3://my-bucket/results"), "/data/results", TesTaskIOType.DIRECTORY)], SIGNED)
+    redacted = redact_presigned_urls(stage_out_script(staged))
+    assert staged[0]["form_fields"]["policy"] not in redacted
+    assert "policy=REDACTED" in redacted
+
+
+def test_directory_output_with_many_files_uploads_all_in_batches(fake_curl, tmp_path):
+    results = tmp_path / "many"
+    results.mkdir()
+    for i in range(250):
+        (results / f"f{i:03}.txt").write_text(f"{i}\n")
+    result, calls = fake_curl([_output_conf(UPLOAD_URL, str(results), TesTaskIOType.DIRECTORY)])
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == 250
+
+
+def test_file_name_ending_in_newline(fake_curl, tmp_path):
+    results = tmp_path / "nl"
+    results.mkdir()
+    (results / "name\n").write_text("nl\n")
+    result, calls = fake_curl([_output_conf(UPLOAD_URL, str(results), TesTaskIOType.DIRECTORY)])
+    assert result.returncode == 0, result.stderr
+    assert [list(call["files"].values()) for call in calls] == [["nl\n"]]
+
+
+def test_directory_output_does_not_follow_symbolic_links(fake_curl, tmp_path):
+    results = tmp_path / "links"
+    results.mkdir()
+    (results / "real.txt").write_text("real\n")
+    (results / "loop").symlink_to(".")
+    (results / "outside").symlink_to("/etc/hostname")
+    result, calls = fake_curl([_output_conf(UPLOAD_URL, str(results), TesTaskIOType.DIRECTORY)])
+    assert result.returncode == 0, result.stderr
+    assert [list(call["files"].values()) for call in calls] == [["real\n"]]
