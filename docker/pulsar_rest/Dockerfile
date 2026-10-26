@@ -51,8 +51,13 @@ RUN curl -LO https://github.com/apptainer/apptainer/releases/download/v${APPTAIN
     && rm apptainer_${APPTAINER_VERSION}_amd64.deb
 
 RUN apt-get update && apt-get install -y curl gnupg-agent software-properties-common lsb-release
-RUN curl -fsSL https://download.docker.com/linux/debian/gpg | apt-key add -
-RUN add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/debian $(lsb_release -cs) stable"
+# On bookworm, add-apt-repository writes an entry apt does not pick up and
+# apt-key is deprecated, so use a dedicated keyring with signed-by.
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+    && chmod a+r /etc/apt/keyrings/docker.asc \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(lsb_release -cs) stable" \
+       > /etc/apt/sources.list.d/docker.list
 RUN apt-get update
 RUN apt-get install -y docker-ce docker-ce-cli containerd.io
 RUN apt-get clean && rm -rf /var/lib/apt/lists/*
