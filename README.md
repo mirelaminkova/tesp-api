@@ -203,6 +203,19 @@ Limitations:
 - The endpoint must be reachable from the Pulsar staging containers. For HTTPS endpoints with a private CA, the
   staging image must trust that CA.
 
+### Task value restrictions
+Executor values are passed to `docker run` / `singularity exec` literally (never expanded by the host shell).
+Values that cannot be passed safely are refused with `400 Bad Request`, naming the field (e.g. `executors[0].env`):
+- environment variable names must match `[A-Za-z_][A-Za-z0-9_]*`;
+- images must not start with `-`;
+- input paths, volumes and the directories of output paths must not contain `:` or `,`, which separate mount specs for
+  Docker and Singularity.
+
+With Singularity, environment variables are passed as `APPTAINERENV_<name>` and `SINGULARITYENV_<name>` rather than
+with `--env`, which splits values on `,` and trims quotes, and `singularity exec` runs with `--no-eval` so values are
+not shell-evaluated inside the container either. This needs Apptainer 1.0+ or SingularityCE 3.10+. Apptainer treats
+the names `PATH`, `PREPEND_PATH` and `APPEND_PATH` specially and does not let tasks override `HOME` or `LD_LIBRARY_PATH`.
+
 &nbsp;
 ### Configuring required services
 You can have a look at [./docker-compose.yaml](https://github.com/CESNET/tesp-api/blob/main/docker-compose.yaml) to see how
