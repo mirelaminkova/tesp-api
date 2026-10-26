@@ -273,6 +273,13 @@ def stage_in_command(
 
     return builder.get_run_command()
 
+def untraced(command: str) -> str:
+    """
+    Runs ``command`` with shell tracing off. The Pulsar job script starts with ``set -xe`` (see event_actions), so
+    tracing is switched back on afterwards. ``{ set +x; } 2>/dev/null`` keeps the ``set +x`` itself out of the trace.
+    """
+    return f"{{ set +x; }} 2>/dev/null && {command} && set -x"
+
 def run_command(
     executor: TesTaskExecutor,
     job_id: str,

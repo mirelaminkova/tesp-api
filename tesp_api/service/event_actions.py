@@ -10,13 +10,14 @@ from pymonad.maybe import Just, Nothing
 from bson.objectid import ObjectId
 from pymonad.promise import Promise, _Promise
 
-from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes
+from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes, untraced
 from tesp_api.service.pulsar_service import pulsar_service
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.service.event_handler import Event, local_handler
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.service.file_transfer_service import file_transfer_service
+from tesp_api.service.client.client_s3 import presign_s3_inputs, redact_presigned_urls
 from tesp_api.service.error import pulsar_event_handle_error, TaskNotFoundError, TaskExecutorError
 from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType
 from tesp_api.repository.model.task import (
@@ -211,7 +212,11 @@ async def handle_run_task(event: Event) -> None:
         stage_in_mount = ""
         if input_confs:
             stage_in_mount = payload['task_config']['inputs_directory']
-            stage_in_cmd = stage_in_command(stage_exec, resource_conf, stage_in_mount, input_confs, CONTAINER_TYPE)
+            stage_in_confs = presign_s3_inputs(input_confs)
+            stage_in_cmd = stage_in_command(stage_exec, resource_conf, stage_in_mount, stage_in_confs, CONTAINER_TYPE)
+            if any(conf.get('presigned') for conf in stage_in_confs):
+                # Presigned URLs must not show up in the `set -x` trace, which is stored as the task's stderr log.
+                stage_in_cmd = untraced(stage_in_cmd)
 
         # Main execution commands
         container_cmds = []
@@ -248,7 +253,7 @@ async def handle_run_task(event: Event) -> None:
             logger.warning(f"Task {task_id} has no commands to run. Treating as successful no-op.")
             command_status = {'stdout': '', 'stderr': 'No commands to run.', 'returncode': 0}
         else:
-            logger.debug(f"Submitting job to Pulsar for task {task_id}: {run_command_str}")
+            logger.debug(f"Submitting job to Pulsar for task {task_id}: {redact_presigned_urls(run_command_str)}")
             await pulsar_operations.run_job(task_id, run_command_str)
             command_status = await pulsar_operations.job_status_complete(str(task_id))
 

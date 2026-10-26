@@ -1,4 +1,5 @@
 import datetime
+from http import HTTPStatus
 
 from pymonad.maybe import Just
 from bson.objectid import ObjectId
@@ -7,10 +8,11 @@ from fastapi.params import Depends
 from fastapi import APIRouter, Body
 from fastapi.responses import Response, JSONResponse
 
-from tesp_api.api.error import api_handle_error
+from tesp_api.api.error import api_handle_error, get_error_response_model, get_response_for_error_model
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.repository.task_repository import task_repository
-from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog
+from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog, \
+    find_unsupported_s3_urls
 from tesp_api.utils.functional import maybe_of, identity_with_side_effect
 from tesp_api.api.model.task_service_info import TesServiceInfo, TesServiceType, TesServiceOrganization
 from tesp_api.api.model.response_models import \
@@ -39,6 +41,16 @@ async def create_task(
         token_subject: str = Depends(parse_verify_token),
         tes_task: TesTask = Body(...)
         ) -> Response:
+    # Checked here rather than in a pydantic validator: tasks stored by older versions must still load, and the
+    # error must not echo the URL, which may contain credentials.
+    unsupported_s3_urls = find_unsupported_s3_urls(tes_task)
+    if unsupported_s3_urls:
+        return get_response_for_error_model(get_error_response_model(
+            HTTPStatus.BAD_REQUEST,
+            message=f"Unsupported S3 URL in {', '.join(unsupported_s3_urls)}: use s3://bucket/key (S3 directory "
+                    f"inputs and S3 outputs are not supported yet). "
+                    f"Credentials, host and port in S3 URLs are not accepted; the S3 endpoint and "
+                    f"credentials are configured on the server."))
     task_to_create = RegisteredTesTask(
         **tes_task.dict(),
         state=TesTaskState.QUEUED,
