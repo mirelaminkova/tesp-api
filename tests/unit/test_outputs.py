@@ -497,3 +497,23 @@ def test_unreadable_directory_fails_the_stage_out(fake_curl, tmp_path):
     finally:
         (results / "sub").chmod(0o755)
     assert result.returncode != 0
+
+
+def test_curl_does_not_glob_task_urls(fake_curl, outputs_dir):
+    url = "http://172.17.0.1:5000/upload/{a,b}/[1-2]"
+    result, calls = fake_curl([_output_conf(url, str(outputs_dir / "out file.txt")),
+                               _output_conf(url, str(outputs_dir / "results"), TesTaskIOType.DIRECTORY)])
+    assert result.returncode == 0, result.stderr
+    assert calls and all(call["args"][0] == "-fsSg" and call["args"][-1] == url for call in calls)
+
+
+def test_s3_directory_file_named_like_the_filename_variable_fails(fake_curl, tmp_path):
+    results = tmp_path / "vars"
+    results.mkdir()
+    (results / "a${filename}").write_text("x\n")
+    staged = presign_s3_outputs(
+        [_output_conf(_s3("s3://my-bucket/work/results"), str(results), TesTaskIOType.DIRECTORY)], SIGNED)
+    result, calls = fake_curl(staged)
+    assert result.returncode != 0
+    assert calls == []
+    assert "tesp-api: cannot upload a${filename} to S3: its name contains ${filename}" in result.stderr.splitlines()

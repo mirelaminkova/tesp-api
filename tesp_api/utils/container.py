@@ -392,12 +392,15 @@ _DIRECTORY_LOOP = (
 _DIRECTORY_BATCH = 100
 
 
+# All curl calls use -g (--globoff): curl would otherwise expand {a,b} and [1-2] in task-provided URLs.
+
+
 def _file_upload(conf: dict, path: str) -> str:
     url = shlex.quote(conf['url'])
     if conf.get('upload') == 's3_put':
-        return f"curl -fsS -T {shlex.quote(path)} {url}"
+        return f"curl -fsSg -T {shlex.quote(path)} {url}"
     # Multipart POST; the file name sent is the base name of the path.
-    return f"curl -fsS -X POST -F {shlex.quote('file=@' + _curl_quoted(path))} {url}"
+    return f"curl -fsSg -X POST -F {shlex.quote('file=@' + _curl_quoted(path))} {url}"
 
 
 def _directory_upload(conf: dict, path: str) -> str:
@@ -406,10 +409,15 @@ def _directory_upload(conf: dict, path: str) -> str:
         # --form-string sends values literally. S3 ignores fields after the file, so the file goes last.
         fields = [f"--form-string key={shlex.quote(conf['key_prefix'])}\"$r\""] + [
             f"--form-string {shlex.quote(f'{name}={value}')}" for name, value in conf['form_fields'].items()]
-        upload = f"curl -fsS {' '.join(fields)} -F \"file=@\\\"$q\\\"\" {url}"
+        # S3 would replace ${filename} in the key with the multipart file name, so such files fail the upload.
+        upload = (
+            "case \"$r\" in *'${filename}'*) "
+            "echo \"tesp-api: cannot upload $r to S3: its name contains \\${filename}\" >&2; exit 1;; esac; "
+            f"curl -fsSg {' '.join(fields)} -F \"file=@\\\"$q\\\"\" {url}"
+        )
     else:
         # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
-        upload = f"curl -fsS -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
+        upload = f"curl -fsSg -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
     loop = _DIRECTORY_LOOP.replace("{upload}", upload)
     # Symbolic links are not followed, as they could point outside the directory or form loops; each is reported.
     # The status of find is lost in the pipe, so a first find pass fails the upload on e.g. unreadable directories.
