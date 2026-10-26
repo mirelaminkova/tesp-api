@@ -54,6 +54,10 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Every docker compose call below uses the override, which caps tesp-api at 512 MiB (no swap) for
+      # tests/large_file_tests.py. The smoke tests run under the same cap.
+      COMPOSE_FILE: docker-compose.yaml:tests/compose.mem-limit.yaml
     steps:
       - name: check out repository
         uses: actions/checkout@v7
@@ -110,6 +114,14 @@ jobs:
 
       - name: run smoke tests
         run: pytest tests/smoke_tests.py
+
+      - name: run large-file tests
+        # 1 GiB through S3 and HTTP inputs and outputs, with tesp-api capped at 512 MiB (issue #6).
+        run: pytest -s tests/large_file_tests.py
+
+      - name: show disk usage
+        if: always()
+        run: df -h / /opt/pysetup/files/staging || true
 
       - name: dump logs on failure
         if: failure() || cancelled()
@@ -222,6 +234,8 @@ jobs:
       AWS_ACCESS_KEY_ID: tesp-test
       AWS_SECRET_ACCESS_KEY: tesp-test-secret
       AWS_DEFAULT_REGION: us-east-1  # for the aws CLI; MinIO ignores it
+      # Same stack as the integration job: tesp-api capped at 512 MiB.
+      COMPOSE_FILE: docker-compose.yaml:tests/compose.mem-limit.yaml
     steps:
       - name: set paths
         # Outside the checkout: compose bind-mounts it into the auto-reloading tesp-api container.
@@ -325,7 +339,8 @@ jobs:
         if: always()
         run: |
           cd "$E2E_DIR/logs"
-          docker compose --project-directory "$GITHUB_WORKSPACE" --profile pulsar logs --no-color > compose.log 2>&1 || true
+          # COMPOSE_FILE is relative to the checkout.
+          (cd "$GITHUB_WORKSPACE" && docker compose --profile pulsar logs --no-color) > compose.log 2>&1 || true
           # The TES view of every task Nextflow submitted (stored s3:// URLs, states, executor logs).
           curl -fsS "http://localhost:8080/v1/tasks?view=FULL" > tasks.json 2>&1 || true
           # Never upload credentials or presigned URLs. A leak fails the job (and names the files);
