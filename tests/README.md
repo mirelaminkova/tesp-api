@@ -1,6 +1,6 @@
 # Testing
 
-Tests for TESP-API come in two kinds:
+Tests for TESP-API come in three kinds:
 
 - **Unit tests** (`tests/unit/`) need no running services:
 
@@ -9,8 +9,9 @@ Tests for TESP-API come in two kinds:
   ```
 
 - **Integration tests** (described below) run against a live TESP-API instance at `http://localhost:8080`.
+- **The GA4GH TES conformance suite** (see [below](#ga4gh-tes-conformance-suite)) runs against the same live instance.
 
-CI (`.github/workflows/ci.yaml`) runs both suites on every pull request and on pushes to `main`.
+CI (`.github/workflows/ci.yaml`) runs all three on every pull request and on pushes to `main`.
 
 ## Prerequisites
 
@@ -52,9 +53,17 @@ With the stack up (see Prerequisites), run [ga4gh/openapi-test-runner](https://g
 bash tests/conformance.sh
 ```
 
-The script fetches the runner at a pinned commit into `.conformance/`, installs it in a virtualenv there, and runs it once per TES version (`1.0.0` and `1.1.0` by default). It writes `report.json`, `run.log` and a `summary.md` table to `.conformance/report/<version>/` for each version. It exits 0 when every test passes, 1 when any test fails and 2 when the run itself breaks. The only change it makes to the suite is lowering the per-task polling timeout from 3600 s to `POLL_TIMEOUT` (600 s by default). The header of `tests/conformance.sh` lists the other variables it reads (`TES_URL`, `TES_VERSIONS`, `WORK_DIR`).
+The script fetches the runner at a pinned commit into `.conformance/`, installs it in a virtualenv there, and runs it once per TES version. It writes `service-info.json` to `.conformance/report/`, plus `report.json`, `run.log` and a `summary.md` table to `.conformance/report/<version>/` for each version. It exits 0 when every test passes, 1 when any test fails and 2 when the run itself breaks or times out. It needs Linux (GNU `sed`).
 
-CI runs the same script in the `conformance` job and uploads `.conformance/report/` as the `conformance-report` artefact. Failures don't fail CI yet; each one is tracked as a `tes-compliance` sub-issue of #2.
+The only change it makes to the suite is lowering the per-task polling timeout from 3600 s. Optional variables:
+
+- `TES_URL`: server root without `/v1` (default `http://localhost:8080/`)
+- `TES_VERSIONS`: TES versions to test (default `1.0.0 1.1.0`)
+- `POLL_TIMEOUT`: seconds to wait for a task to finish (default `600`)
+- `RUN_TIMEOUT`: seconds one TES version's run may take in total (default `1500`)
+- `WORK_DIR`: where the runner, virtualenv and reports go (default `.conformance` in the repository root)
+
+CI runs the same script in the `conformance` job (with its work directory outside the checkout, which compose bind-mounts into the auto-reloading server) and uploads the report directory as the `conformance-report` artefact. Failures don't fail CI yet; each one is tracked as a `tes-compliance` sub-issue of #2.
 
 ## Platform Notes
 
