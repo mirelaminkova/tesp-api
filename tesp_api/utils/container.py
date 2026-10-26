@@ -8,6 +8,7 @@ from pymonad.maybe import Nothing, Maybe, Just
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskOutput, TesTaskIOType, \
     is_valid_env_name, is_valid_image, is_valid_mount_path
+from tesp_api.utils.resource_values import positive, ram_mib
 from tesp_api.utils.functional import get_else_throw, maybe_of
 
 SHELL_PATTERN = re.compile(r"[|&;<>(){}$*?\"'\\]")
@@ -25,8 +26,8 @@ class ContainerCommandBuilder:
     def __init__(self, container_type: str) -> None:
         self.container_type = container_type
         self._job_id: str = ""
-        self._resource_cpu: Maybe[str] = Nothing
-        self._resource_mem: Maybe[str] = Nothing
+        self._resource_cpu: Maybe[int] = Nothing
+        self._resource_mem: Maybe[float] = Nothing
         self._image: Maybe[str] = Nothing
         self._workdir: Maybe[str] = Nothing
         self._envs: Dict[str, str] = {}
@@ -45,8 +46,8 @@ class ContainerCommandBuilder:
     def with_resource(self, resources: dict):
         if not resources:
             return self
-        self._resource_cpu = maybe_of(resources.get("cpu_cores"))
-        self._resource_mem = maybe_of(resources.get("ram_gb"))
+        self._resource_cpu = maybe_of(positive(resources.get("cpu_cores")))
+        self._resource_mem = maybe_of(positive(resources.get("ram_gb")))
         return self
 
     def with_bind_mount(self, container_path: str, host_path: str):
@@ -187,9 +188,10 @@ class ContainerCommandBuilder:
         """
         docker = self.container_type == "docker"
 
-        # Common resource flags
-        cpu_flag = self._resource_cpu.maybe("", lambda cpu: f"--cpus={cpu}" if docker else f"--cpu={cpu}")
-        mem_flag = self._resource_mem.maybe("", lambda mem: f"--memory={mem}g" if docker else f"--memory={mem}G")
+        # Resource limits; docker and apptainer take the same flags. Whether they are wanted at all is decided by the
+        # caller (container.resource_limits, see tesp_api.service.resources).
+        cpu_flag = self._resource_cpu.maybe("", lambda cpu: f"--cpus={cpu}")
+        mem_flag = self._resource_mem.maybe("", lambda mem: f"--memory={ram_mib(mem)}m")
 
         # Environment variables
         for name in self._envs:
