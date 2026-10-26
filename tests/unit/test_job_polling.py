@@ -5,6 +5,9 @@ The old loop gave up after `pulsar.status.max_polls` × `pulsar.status.poll_inte
 failed while its job kept running.
 """
 import asyncio
+import importlib
+import sys
+import types
 
 import aiohttp
 import pytest
@@ -16,9 +19,7 @@ from pymonad.maybe import Just
 from pymonad.promise import Promise
 from yarl import URL
 
-import tesp_api.service.error as error_module
 from tesp_api.repository.model.task import TesTaskState
-from tesp_api.service.error import pulsar_event_handle_error
 from tesp_api.service.job_polling import (
     POLL_INTERVAL_GROWTH, PulsarJobTimeoutError, StatusPolling, TaskCanceledError, load_status_polling,
     poll_until_complete)
@@ -185,9 +186,16 @@ def test_timeout_cancels_the_pulsar_job_and_records_system_error(monkeypatch):
         updates.append((query, update))
         return Promise(lambda resolve, reject: resolve(Just(None)))
 
-    monkeypatch.setattr(error_module.task_repository, 'update_task', update_task)
+    # The real task repository imports motor 2.5, which needs Python < 3.11 (asyncio.coroutine).
+    repository = types.ModuleType('tesp_api.repository.task_repository')
+    repository.task_repository = types.SimpleNamespace(update_task=update_task)
+    monkeypatch.setitem(sys.modules, 'tesp_api.repository.task_repository', repository)
+    monkeypatch.setitem(sys.modules, 'tesp_api.service.error', None)  # undone after the test: no stubbed copy left
+    del sys.modules['tesp_api.service.error']
+    error_module = importlib.import_module('tesp_api.service.error')
+
     async def handle():
-        await pulsar_event_handle_error(PulsarJobTimeoutError(3600), 'abc', 'run_task', Operations())
+        await error_module.pulsar_event_handle_error(PulsarJobTimeoutError(3600), 'abc', 'run_task', Operations())
 
     asyncio.run(handle())
 
