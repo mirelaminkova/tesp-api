@@ -1,61 +1,104 @@
 name: ci
 
-on: [push, pull_request]
+# Fork CI: needs no repository secrets. Publishing images is release work and
+# stays manual. Job names (lint, types, unit, integration) are stable so branch
+# protection can require them.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
 
-  deployment-test:
+  lint:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash -l {0}
     steps:
+      - name: lint placeholder
+        # TODO: replace with ruff / pre-commit in the process-setup issue.
+        run: echo "No linters configured yet."
 
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - name: types placeholder
+        # TODO: replace with mypy in the process-setup issue.
+        run: echo "No type checker configured yet."
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
       - name: check out repository
-        uses: actions/checkout@v4
-        
-      - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/checkout@v7
+
+      - name: set up Python
+        uses: actions/setup-python@v7
         with:
-          python-version: 3.11
+          python-version: "3.11"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+      - name: install dependencies
+        run: pip install . pytest
 
-      - name: Log in to Docker Hub
-        run: echo "${{ secrets.HARBOR_CLI_PASSWORD }}" | docker login cerit.io -u "${{ secrets.HARBOR_CLI_USERNAME }}" --password-stdin
+      - name: run unit tests
+        run: pytest tests/unit
 
-      - name: run docker compose
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: check out repository
+        uses: actions/checkout@v7
+
+      - name: set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: start compose stack
+        run: docker compose --profile pulsar up -d --build
+
+      - name: install test dependencies
+        run: pip install . pytest flask
+
+      - name: wait for tesp-api
         run: |
-          docker compose --profile pulsar up -d --build
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://localhost:8080/v1/service-info; then
+              echo "tesp-api is up"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "tesp-api did not answer on :8080 within 5 minutes" >&2
+          exit 1
 
-      - name: install flask
-        run: pip install flask
-
-      - name: run upload_server.py
+      - name: start upload server
         run: |
-          python tests/upload_server.py &
+          nohup python tests/upload_server.py > upload_server.log 2>&1 &
+          for _ in $(seq 1 30); do
+            # Any HTTP response (even 404) means Flask is listening.
+            if curl -sS -o /dev/null http://localhost:5000/; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "upload server did not start" >&2
+          cat upload_server.log
+          exit 1
 
-      - name: Install dependencies
-        run: pip install .
+      - name: run smoke tests
+        run: pytest tests/smoke_tests.py
 
-      - name: instal pytest
-        run: pip install pytest
-
-      - name: pytest run smoke tests
+      - name: dump logs on failure
+        if: failure()
         run: |
-          pytest tests/smoke_tests.py
-
-      - name: Set version from CHANGELOG
-        id: version
-        run: |
-          version=$(bash ci/version.sh CHANGELOG.md)
-          echo "::set-output name=version::$version"
-
-      - name: Tag Docker image
-        run: |
-          docker tag tesp-api:latest cerit.io/tesp-api/tesp-api:${{ steps.version.outputs.version }}
-
-      - name: Push Docker image
-        run: |
-          docker push cerit.io/tesp-api/tesp-api:${{ steps.version.outputs.version }} 
+          docker compose --profile pulsar ps -a
+          docker compose --profile pulsar logs --no-color
+          cat upload_server.log || true
