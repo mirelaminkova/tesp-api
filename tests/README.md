@@ -24,7 +24,7 @@ docker compose --profile pulsar up -d --build
 
 ### 1. Start the upload server
 
-For I/O tests (`test_inputs`, `test_dir_input`, `test_volumes`, `test_envs`), the test fixtures download/upload files via HTTP. Start the local file server:
+For I/O tests (`test_inputs`, `test_dir_input`, `test_volumes`, `test_envs`, `test_stdout`, `test_stderr`), the test fixtures download/upload files via HTTP. Start the local file server:
 
 ```bash
 python3 tests/upload_server.py
@@ -36,6 +36,14 @@ This serves `tests/test_data/` on port 5000 and accepts uploads to `tests/upload
 
 ```bash
 python3 -m pytest tests/smoke_tests.py -v
+```
+
+### Unit tests
+
+Unit tests in `tests/unit/` need no running stack:
+
+```bash
+python3 -m pytest tests/unit -v
 ```
 
 ### Load/stress test (100 concurrent tasks)
@@ -64,6 +72,9 @@ All task JSON fixtures are in `test_jsons/`. Key files:
 | `volumes.json` | Shared volume between executors | **Yes** |
 | `envs.json` | Environment variables with output upload | **Yes** |
 | `workdir.json` | Working directory test | No |
+| `stdin.json` | Executor `stdin` piped from an inline input | No |
+| `stdout.json` | Executor `stdout` written to a file and uploaded | **Yes** |
+| `stderr.json` | Executor `stderr` written to a file and uploaded | **Yes** |
 
 ## DTS (Data Transfer Services)
 
