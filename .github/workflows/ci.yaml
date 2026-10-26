@@ -53,6 +53,10 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Every docker compose call below uses the override, which caps tesp-api at 512 MiB (no swap) for
+      # tests/large_file_tests.py. The smoke tests run under the same cap.
+      COMPOSE_FILE: docker-compose.yaml:tests/compose.mem-limit.yaml
     steps:
       - name: check out repository
         uses: actions/checkout@v7
@@ -109,6 +113,14 @@ jobs:
 
       - name: run smoke tests
         run: pytest tests/smoke_tests.py
+
+      - name: run large-file tests
+        # 1 GiB through S3 and HTTP inputs and outputs, with tesp-api capped at 512 MiB (issue #6).
+        run: pytest -s tests/large_file_tests.py
+
+      - name: show disk usage
+        if: always()
+        run: df -h / /opt/pysetup/files/staging || true
 
       - name: dump logs on failure
         if: failure() || cancelled()
