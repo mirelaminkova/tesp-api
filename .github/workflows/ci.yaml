@@ -122,11 +122,22 @@ jobs:
         if: always()
         run: df -h / /opt/pysetup/files/staging || true
 
+      - name: scan logs for presigned URLs
+        # Runs on success too, so a leak fails the job; the fork's logs are public (issue #39).
+        id: scan
+        if: always()
+        run: |
+          docker compose --profile pulsar logs --no-color > "$RUNNER_TEMP/compose.log" 2>&1 || true
+          logs=("$RUNNER_TEMP/compose.log")
+          if [ -f upload_server.log ]; then logs+=(upload_server.log); fi
+          bash ci/scan-logs.sh "${logs[@]}"
+
       - name: dump logs on failure
-        if: failure() || cancelled()
+        # Only logs the scan passed are printed.
+        if: (failure() || cancelled()) && steps.scan.outcome == 'success'
         run: |
           docker compose --profile pulsar ps -a
-          docker compose --profile pulsar logs --no-color
+          cat "$RUNNER_TEMP/compose.log"
           cat upload_server.log || true
 
   # GA4GH TES conformance audit (issue #2). Known failures are tracked as
@@ -208,8 +219,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/conformance/report"
           docker compose --profile pulsar logs --no-color > "$RUNNER_TEMP/conformance/report/compose.log" 2>&1 || true
 
-      - name: upload report
+      - name: scan logs for presigned URLs
+        # The report is uploaded only if it holds no presigned URLs or S3 credentials (issue #39). The job-level
+        # continue-on-error keeps a leak here from failing the run; the integration job's scan does that.
+        id: scan
         if: always()
+        run: bash ci/scan-logs.sh "$RUNNER_TEMP/conformance/report"
+
+      - name: upload report
+        if: always() && steps.scan.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: conformance-report

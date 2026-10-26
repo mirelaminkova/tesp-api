@@ -440,7 +440,7 @@ def test_redaction_hides_policy_which_contains_the_access_key_id():
         [_output_conf(_s3("s3://my-bucket/results"), "/data/results", TesTaskIOType.DIRECTORY)], SIGNED)
     redacted = redact_presigned_urls(stage_out_script(staged))
     assert staged[0]["form_fields"]["policy"] not in redacted
-    assert "policy=REDACTED" in redacted
+    assert "policy=" not in redacted  # the whole field goes, name included (issue #39)
 
 
 def test_directory_output_with_many_files_uploads_all_in_batches(fake_curl, tmp_path):

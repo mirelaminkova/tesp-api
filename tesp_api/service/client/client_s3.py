@@ -19,8 +19,12 @@ MAX_PRESIGN_EXPIRY_SECONDS = 7 * 24 * 3600  # SigV4 limit
 
 # Query parameters of presigned URLs and form fields of presigned POSTs (lower case), e.g. `x-amz-signature=...`.
 # The POST policy is redacted too: it contains the x-amz-credential condition, i.e. the access key id.
+# The second form is the same text URL-encoded once, as aiohttp sends the job command line to Pulsar
+# (`command_line=...X-Amz-Signature%3D...%26...`); there `+` is an encoded space, so it ends the value.
+_SECRET_NAME = r'(?i:X-Amz-(?:Credential|Signature|Security-Token)|policy)'
 _PRESIGNED_SECRET_PARAMS = re.compile(
-    r'((?<![\w-])(?i:X-Amz-(?:Credential|Signature|Security-Token)|policy)=)[^&\s\'"]+')
+    rf'(?<![\w-]){_SECRET_NAME}=[^&\s\'"]+'
+    rf'|(?:(?<![\w-])|(?<=%[0-9A-Fa-f]{{2}})){_SECRET_NAME}%3[Dd](?:(?!%2[0267])[^&\s\'"+])+')
 
 
 @dataclass(frozen=True)
@@ -189,9 +193,10 @@ def presign_s3_outputs(output_confs: List[dict], config: Optional[S3Config] = No
 def redact_presigned_urls(text: str) -> str:
     """
     Hides the access key id, signature and session token of presigned URLs and presigned POST fields in ``text``
-    (for logging).
+    (for logging), raw or URL-encoded. Each such parameter is replaced as a whole, name included, so that a scan for
+    the names (``ci/scan-logs.sh``) finds only parameters that were not redacted.
     """
-    return _PRESIGNED_SECRET_PARAMS.sub(r'\1REDACTED', text)
+    return _PRESIGNED_SECRET_PARAMS.sub('REDACTED', text)
 
 
 # TODO: Error handling, maybe_of

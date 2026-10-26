@@ -112,12 +112,16 @@ async def _with_pulsar_stub(handler, scenario):
 
     app = web.Application()
     app.router.add_post("/jobs/{job_id}/submit", submit)
-    async with TestServer(app) as server:
+    server = TestServer(app)
+    await server.start_server(access_log=None)  # the stub's access log is Pulsar's, not tesp-api's
+    try:
         trace_config = aiohttp.TraceConfig()
         trace_config.on_request_start.append(log_pulsar_request)
         async with aiohttp.ClientSession(trace_configs=[trace_config]) as session:
             operations = PulsarRestOperations(session, str(server.make_url("")).rstrip("/"), 0, 1)
             await scenario(operations, received)
+    finally:
+        await server.close()
     return received
 
 
