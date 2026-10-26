@@ -48,7 +48,7 @@ STUB = f"""#!{sys.executable}
 import json, os, sys
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write(json.dumps({{"argv": [os.path.basename(sys.argv[0]), *sys.argv[1:]],
-                          "env": {{k: v for k, v in os.environ.items() if k.startswith("SINGULARITYENV_")}}}}) + "\\n")
+                          "env": {{k: v for k, v in os.environ.items() if k.startswith(("APPTAINERENV_", "SINGULARITYENV_"))}}}}) + "\\n")
 """
 
 
@@ -92,7 +92,11 @@ def _env_args(container_type, call):
     if container_type == "docker":
         argv = call["argv"]
         return dict(arg[len("--env="):].split("=", 1) for arg in argv if arg.startswith("--env="))
-    return {k[len("SINGULARITYENV_"):]: v for k, v in call["env"].items()}
+    envs = {prefix: {k[len(prefix):]: v for k, v in call["env"].items() if k.startswith(prefix)}
+            for prefix in ("APPTAINERENV_", "SINGULARITYENV_")}
+    # Apptainer reads both prefixes and only accepts them silently when the values are equal
+    assert envs["APPTAINERENV_"] == envs["SINGULARITYENV_"]
+    return envs["SINGULARITYENV_"]
 
 
 # --- env ---------------------------------------------------------------------------------------------------
@@ -150,10 +154,10 @@ def test_workdir_is_passed_intact(container_type, workdir, tmp_path):
 def test_image_is_passed_intact(container_type, image, tmp_path):
     command = _builder(container_type, image).get_run_command()
 
-    expected = image if container_type == "docker" else f"docker://{image}"
-    tokens = shlex.split(command)
-    assert tokens[-2:] == [expected, "true"]
-    assert _runtime_call(_run_with_stubs(command, tmp_path))["argv"][-2:] == [expected, "true"]
+    # singularity runs every command through `sh -c`
+    expected = [image, "true"] if container_type == "docker" else [f"docker://{image}", "sh", "-c", "true"]
+    assert shlex.split(command)[-len(expected):] == expected
+    assert _runtime_call(_run_with_stubs(command, tmp_path))["argv"][-len(expected):] == expected
 
 
 @pytest.mark.parametrize("container_type", CONTAINER_TYPES)
