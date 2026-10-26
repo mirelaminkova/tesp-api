@@ -41,8 +41,9 @@ async def log_pulsar_request(session, context, params: TraceRequestStartParams):
 
 
 def _error_message(error: Exception) -> str:
-    # aiohttp's ClientResponseError names the request URL, and that may hold the job command line.
-    return redact_presigned_urls(str(error))
+    # aiohttp's ClientResponseError names the request URL, and that may hold the job command line. The type is named
+    # because the wrapped error is hidden from tracebacks, and some (asyncio.TimeoutError) have no message.
+    return f'{type(error).__name__}: {redact_presigned_urls(str(error))}'
 
 
 class DataType(str, Enum):

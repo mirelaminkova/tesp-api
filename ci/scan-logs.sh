@@ -27,7 +27,7 @@ for path in "$@"; do
             leak=true
             # -r prefixes each match with its file name when given a directory; compose prefixes the service name.
             printf '%s\n' "$matches" | LC_ALL=C sed -nE \
-                -e 's/^(([^:]*):)?([0-9]+):([[:alnum:]_.-]+ *)\|.*$/\2 line \3: \4/p; t' \
+                -e 's/^(([^:]*):)?([0-9]+):([[:alnum:]_.-]+ +)\|.*$/\2 line \3: \4/p; t' \
                 -e 's/^(([^:]*):)?([0-9]+):.*$/\2 line \3/p' \
                 | sed "s|^ line| $path line|" >&2
             ;;

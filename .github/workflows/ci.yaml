@@ -203,8 +203,25 @@ jobs:
           RUN_TIMEOUT: "1500"
         run: bash tests/conformance.sh
 
-      - name: publish summary
+      - name: collect compose logs
         if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/conformance/report"
+          docker compose --profile pulsar logs --no-color > "$RUNNER_TEMP/conformance/report/compose.log" 2>&1 || true
+
+      - name: scan logs for presigned URLs
+        # The report is published only if it holds no presigned URLs or S3 credentials (issue #39). The job-level
+        # continue-on-error keeps a leak here from failing the run; the integration job's scan does that.
+        id: scan
+        if: always()
+        run: |
+          if ! bash ci/scan-logs.sh "$RUNNER_TEMP/conformance/report"; then
+            echo "::error title=Log scan::The conformance report or compose logs hold presigned URLs or S3 credentials; not publishing or uploading them."
+            exit 1
+          fi
+
+      - name: publish summary
+        if: always() && steps.scan.outcome == 'success'
         run: cat "$RUNNER_TEMP"/conformance/report/*/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
       - name: flag failures
@@ -215,19 +232,6 @@ jobs:
           else
             echo "::error title=TES conformance::The conformance run broke before finishing; see the step log and run.log in the conformance-report artefact."
           fi
-
-      - name: collect compose logs
-        if: always()
-        run: |
-          mkdir -p "$RUNNER_TEMP/conformance/report"
-          docker compose --profile pulsar logs --no-color > "$RUNNER_TEMP/conformance/report/compose.log" 2>&1 || true
-
-      - name: scan logs for presigned URLs
-        # The report is uploaded only if it holds no presigned URLs or S3 credentials (issue #39). The job-level
-        # continue-on-error keeps a leak here from failing the run; the integration job's scan does that.
-        id: scan
-        if: always()
-        run: bash ci/scan-logs.sh "$RUNNER_TEMP/conformance/report"
 
       - name: upload report
         if: always() && steps.scan.outcome == 'success'

@@ -184,6 +184,7 @@ def test_wrapped_operation_errors_are_redacted(capsys):
         except ValueError as cause:
             PulsarRestOperations._reraise_custom(cause)
     except PulsarOperationsError as error:
+        assert "ValueError: unexpected answer for set -xe" in str(error)  # the wrapped error is hidden from tracebacks
         _assert_clean(str(error))
         logger.opt(exception=True).error(f"Pulsar operations error [msg: {error}]")
     _assert_clean(capsys.readouterr().out)
