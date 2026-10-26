@@ -179,12 +179,6 @@ async def handle_run_task(event: Event) -> None:
     output_confs: List[dict] = payload['output_confs']
     pulsar_operations: PulsarRestOperations = payload['pulsar_operations']
 
-    # TES resources go to the batch system (native specification) and, per container.resource_limits, onto the
-    # container command lines.
-    resource_config = get_resource_config()
-    submit_params = resource_config.submit_params(resource_conf)
-    resource_conf = resource_config.container_resource_conf(resource_conf, CONTAINER_TYPE)
-
     run_command_str = None
     command_start_time = datetime.datetime.now(datetime.timezone.utc)
 
@@ -211,6 +205,12 @@ async def handle_run_task(event: Event) -> None:
             TesTaskState.RUNNING,
             start_time=Just(datetime.datetime.now(datetime.timezone.utc))
         )
+
+        # TES resources go to the batch system (native specification) and, per container.resource_limits, onto the
+        # container command lines.
+        resource_config = get_resource_config()
+        submit_params = resource_config.submit_params(resource_conf)
+        resource_conf = resource_config.container_resource_conf(resource_conf, CONTAINER_TYPE)
 
         stage_exec = TesTaskExecutor(image="willdockerhub/curl-wget:latest", command=[], workdir=Path("/downloads"))
 

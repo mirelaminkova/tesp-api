@@ -50,8 +50,10 @@ def test_memory_rounds_up_to_whole_mib(ram_gb, flag):
     assert flag in argv
 
 
-@pytest.mark.parametrize("resources", [{'cpu_cores': 0, 'ram_gb': 0}, {'cpu_cores': -1, 'ram_gb': -2}])
-def test_non_positive_resources_are_ignored(resources):
+@pytest.mark.parametrize("resources", [{'cpu_cores': 0, 'ram_gb': 0}, {'cpu_cores': -1, 'ram_gb': -2},
+                                       {'cpu_cores': 10 ** 400, 'ram_gb': float('inf')}, {'ram_gb': 1e308},
+                                       {'ram_gb': float('nan')}, {'cpu_cores': True}])
+def test_unusable_resources_are_ignored(resources):
     argv = shlex.split(ContainerCommandBuilder("docker").with_image("alpine")
                        .with_resource(resources).get_run_command())
     assert not any(arg.startswith(("--cpus", "--memory")) for arg in argv)
@@ -81,22 +83,37 @@ def test_default_mode_is_auto():
 
 
 def test_invalid_mode_is_rejected():
-    with pytest.raises(ValueError, match="container.resource_limits"):
+    with pytest.raises(ValueError, match="container.resource_limits .*'sometimes'"):
         ResourceConfig(container_limits="sometimes")
+
+
+@pytest.mark.parametrize("props, mode", [
+    ({'container': {'resource_limits': ' ALWAYS '}}, 'always'),
+    ({'container': {'resource_limits': None}}, 'auto'),
+    ({'container': None, 'pulsar': {'url': 'http://pulsar'}}, 'auto'),
+    ({'pulsar': {'native_specification': None}}, 'auto'),
+])
+def test_load_edge_cases(props, mode):
+    assert load_resource_config(props) == ResourceConfig(container_limits=mode)
+
+
+def test_load_non_string_mode_is_rejected():
+    with pytest.raises(ValueError, match="'false'"):
+        load_resource_config({'container': {'resource_limits': False}})
 
 
 def test_load_from_settings():
     config = load_resource_config({
         'container': {'resource_limits': 'Never'},
-        'pulsar': {'native_specification': {'cpu_cores': '--cpus-per-task={cpu_cores}', 'ram_gb': '--mem={ram_mb}'}},
+        'pulsar': {'native_specification': {'cpu_cores': '--cpus-per-task={cpu_cores}', 'ram_gb': '--mem={ram_mib}'}},
     })
     assert config == ResourceConfig(container_limits='never', native_spec_cpu_cores='--cpus-per-task={cpu_cores}',
-                                    native_spec_ram_gb='--mem={ram_mb}')
+                                    native_spec_ram_gb='--mem={ram_mib}')
 
 
 # --- Native specification (e.g. SLURM through Pulsar's DRMAA manager) ----------------------------------------------
 
-SLURM = ResourceConfig(native_spec_cpu_cores="--cpus-per-task={cpu_cores}", native_spec_ram_gb="--mem={ram_mb}")
+SLURM = ResourceConfig(native_spec_cpu_cores="--cpus-per-task={cpu_cores}", native_spec_ram_gb="--mem={ram_mib}")
 
 
 def test_no_native_specification_by_default():
@@ -131,10 +148,25 @@ def test_native_specification_is_independent_of_container_limits():
     assert config.native_specification(RESOURCES) == "--cpus-per-task=2"
 
 
-@pytest.mark.parametrize("template", ["--mem={memory}", "--mem={0}", "--mem={ram_mb", "--mem={ram_mb.real.x}"])
-def test_invalid_template_is_rejected(template):
+@pytest.mark.parametrize("resources", [{'cpu_cores': 2, 'ram_gb': float('inf')}, {'cpu_cores': 2, 'ram_gb': 1e308}])
+def test_native_specification_ignores_unusable_resources(resources):
+    # 1e308 GB in MiB overflows to inf; it must not crash the task handler.
+    assert SLURM.native_specification(resources) == "--cpus-per-task=2"
+
+
+@pytest.mark.parametrize("template", ["--mem={memory}", "--mem={0}", "--mem={}", "--mem={ram_mib",
+                                      "--mem={ram_mib.real.x}", "--mem={ram_mib[0]}", "--mem={ram_gb:d}",
+                                      "--mem={ram_mib} --cpus-per-task={cpu_cores}"])
+def test_invalid_ram_template_is_rejected(template):
     with pytest.raises(ValueError, match="pulsar.native_specification.ram_gb"):
         ResourceConfig(native_spec_ram_gb=template)
+
+
+# A template only gets its own resource's values: the other resource may not be requested.
+@pytest.mark.parametrize("template", ["--cpus-per-task={cpu_cores} --mem={ram_mib}", "--mem={ram_gb}", "{cpu_cores:q}"])
+def test_invalid_cpu_template_is_rejected(template):
+    with pytest.raises(ValueError, match="pulsar.native_specification.cpu_cores"):
+        ResourceConfig(native_spec_cpu_cores=template)
 
 
 # --- Submit parameters reach Pulsar ---------------------------------------------------------------------------------

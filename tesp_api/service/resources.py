@@ -1,36 +1,34 @@
-import math
 from dataclasses import dataclass
 from functools import lru_cache
 from string import Formatter
 from typing import Optional
 
 from tesp_api.config.properties import properties
+from tesp_api.utils.resource_values import positive, ram_mib
 
-RESOURCE_LIMIT_MODES = {'auto', 'always', 'never'}
+RESOURCE_LIMIT_MODES = ('auto', 'always', 'never')
 # Runtimes whose limit flags work without extra host setup; "auto" applies limits only for these.
 _AUTO_LIMIT_RUNTIMES = {'docker'}
-_TEMPLATE_FIELDS = {'cpu_cores', 'ram_gb', 'ram_mb'}
 
 
-def positive(value) -> Optional[float]:
-    """``value`` if it is a positive number, else ``None``: TES resources are optional hints."""
-    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else None
+def _cpu_values(cpu_cores) -> dict:
+    return {'cpu_cores': cpu_cores}
 
 
-def ram_mib(ram_gb: float) -> int:
-    """TES ``ram_gb`` in whole MiB, rounded up so the limit is never below the request."""
-    return math.ceil(ram_gb * 1024)
+def _ram_values(ram_gb) -> dict:
+    return {'ram_gb': ram_gb, 'ram_mib': ram_mib(ram_gb)}
 
 
-def _check_template(name: str, template: str):
+def _check_template(name: str, template: str, values: dict):
+    """Each template may only use the placeholders of its own resource, which are set whenever it is used."""
     try:
         fields = {field for _, field, _, _ in Formatter().parse(template) if field is not None}
     except ValueError as e:
         raise ValueError(f'{name}: {e}') from None
-    if not fields <= _TEMPLATE_FIELDS:
-        raise ValueError(f'{name} may only use the placeholders {sorted(_TEMPLATE_FIELDS)}')
+    if not fields <= values.keys():
+        raise ValueError(f'{name} may only use the placeholders {sorted("{" + key + "}" for key in values)}')
     try:
-        template.format(cpu_cores=1, ram_gb=1.5, ram_mb=1536)  # e.g. a format spec that does not fit
+        template.format(**values)  # e.g. a format spec that does not fit
     except (ValueError, TypeError) as e:
         raise ValueError(f'{name}: {e}') from None
 
@@ -46,8 +44,9 @@ class ResourceConfig:
     fails the task without one, hence ``auto`` leaves them out for singularity.
 
     ``native_spec_*`` are templates for the DRMAA native specification Pulsar sends to the batch system (e.g.
-    ``--cpus-per-task={cpu_cores}`` and ``--mem={ram_mb}`` for SLURM), each used only when the task requests that
-    resource. Placeholders: ``{cpu_cores}``, ``{ram_gb}`` and ``{ram_mb}`` (ram_gb in whole MiB, rounded up).
+    ``--cpus-per-task={cpu_cores}`` and ``--mem={ram_mib}`` for SLURM), each used only when the task requests that
+    resource. Placeholders: ``{cpu_cores}`` for the CPU template, ``{ram_gb}`` and ``{ram_mib}`` (ram_gb in whole MiB,
+    rounded up) for the memory template.
     """
     container_limits: str = 'auto'
     native_spec_cpu_cores: str = ''
@@ -55,9 +54,10 @@ class ResourceConfig:
 
     def __post_init__(self):
         if self.container_limits not in RESOURCE_LIMIT_MODES:
-            raise ValueError(f'container.resource_limits must be one of {sorted(RESOURCE_LIMIT_MODES)}')
-        _check_template('pulsar.native_specification.cpu_cores', self.native_spec_cpu_cores)
-        _check_template('pulsar.native_specification.ram_gb', self.native_spec_ram_gb)
+            raise ValueError(f'container.resource_limits must be one of {", ".join(RESOURCE_LIMIT_MODES)}, '
+                             f'got {self.container_limits!r}')
+        _check_template('pulsar.native_specification.cpu_cores', self.native_spec_cpu_cores, _cpu_values(2))
+        _check_template('pulsar.native_specification.ram_gb', self.native_spec_ram_gb, _ram_values(1.5))
 
     def container_resource_conf(self, resource_conf: Optional[dict], container_type: str) -> dict:
         """``resource_conf`` if limit flags go on the ``container_type`` command line, else ``{}``."""
@@ -70,10 +70,11 @@ class ResourceConfig:
         resource_conf = resource_conf or {}
         cpu_cores = positive(resource_conf.get('cpu_cores'))
         ram_gb = positive(resource_conf.get('ram_gb'))
-        values = {'cpu_cores': cpu_cores, 'ram_gb': ram_gb, 'ram_mb': ram_gb and ram_mib(ram_gb)}
-        parts = [template.format(**values) for template, requested in
-                 ((self.native_spec_cpu_cores, cpu_cores), (self.native_spec_ram_gb, ram_gb))
-                 if template and requested is not None]
+        parts = []
+        if self.native_spec_cpu_cores and cpu_cores is not None:
+            parts.append(self.native_spec_cpu_cores.format(**_cpu_values(cpu_cores)))
+        if self.native_spec_ram_gb and ram_gb is not None:
+            parts.append(self.native_spec_ram_gb.format(**_ram_values(ram_gb)))
         return ' '.join(parts)
 
     def submit_params(self, resource_conf: Optional[dict]) -> dict:

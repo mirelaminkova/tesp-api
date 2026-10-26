@@ -175,22 +175,26 @@ backend treat resources as a request it may not honour).
 |---|---|---|---|
 | `container.resource_limits` | `TESP_API_CONTAINER__RESOURCE_LIMITS` | `auto` | Pass `--cpus`/`--memory` to the container runtime: `auto` for `docker` only, `always` for `docker` and `singularity`, `never` for neither |
 | `pulsar.native_specification.cpu_cores` | `TESP_API_PULSAR__NATIVE_SPECIFICATION__CPU_CORES` | empty | Native specification template used when a task requests CPUs, e.g. `--cpus-per-task={cpu_cores}` for SLURM |
-| `pulsar.native_specification.ram_gb` | `TESP_API_PULSAR__NATIVE_SPECIFICATION__RAM_GB` | empty | Native specification template used when a task requests memory, e.g. `--mem={ram_mb}` for SLURM |
+| `pulsar.native_specification.ram_gb` | `TESP_API_PULSAR__NATIVE_SPECIFICATION__RAM_GB` | empty | Native specification template used when a task requests memory, e.g. `--mem={ram_mib}` for SLURM |
 
 **Container flags.** `--memory` gets `ram_gb` in whole MiB, rounded up (e.g. `--memory=1536m` for 1.5 GB). Docker
 applies both flags itself. Apptainer needs cgroups v2 and a usable cgroups manager on the Pulsar host (systemd, or
 cgroupfs with delegation), and without one it fails the task before it starts (`systemd not running on this host,
 cannot use systemd cgroups manager`, exit code 255). That is the case for Pulsar in a container (as in
 `docker-compose.yaml`) and on many batch nodes, so the default `auto` leaves the flags out for `singularity`. Set
-`always` only where `singularity exec --cpus=1 --memory=512m docker://alpine true` works for the Pulsar user.
+`always` only where `singularity exec --cpus=1 --memory=512m docker://alpine true` works for the Pulsar user. The
+flags also go to the stage-in and stage-out containers, so a task with a small `ram_gb` downloads and uploads its files
+within that memory limit.
 
 **Batch system.** When Pulsar submits jobs to a batch system through one of its DRMAA managers (e.g. SLURM via
 `slurm-drmaa`), the batch system is where limits belong: it reserves the resources when scheduling and enforces them
-for the whole job, staging included. With the templates set, `TESP API` sends each job a `native_specification` built
-from the task's resources (placeholders `{cpu_cores}`, `{ram_gb}`, and `{ram_mb}` for `ram_gb` in whole MiB, rounded
-up), e.g. `--cpus-per-task=2 --mem=1536`. A template is left out when the task does not request that resource. Pulsar
-uses it only when its manager has no `native_specification` of its own (otherwise Pulsar logs a warning and keeps its
-own); managers without DRMAA (e.g. Pulsar's default local queue) ignore it.
+for the whole job, staging included. With the templates set, `TESP API` submits each job to Pulsar's REST interface with a
+`native_specification` built from the task's resources, e.g. `--cpus-per-task=2 --mem=1536`. The CPU template may use
+`{cpu_cores}`, the memory template `{ram_gb}` and `{ram_mib}` (`ram_gb` in whole MiB, rounded up); a template is left
+out when the task does not request that resource. Pulsar uses it only when its DRMAA manager has no
+`native_specification` of its own (otherwise Pulsar logs a warning and keeps its own). Pulsar's local queue and CLI
+managers ignore it; the HTCondor manager would write it into the submit file as an unknown `native_specification`
+command, so leave the templates empty there.
 
 &nbsp;
 ### S3 inputs and outputs
