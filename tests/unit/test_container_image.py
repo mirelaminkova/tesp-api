@@ -47,7 +47,8 @@ def test_builder_rejects_host_image(container_type, image):
     # Tasks stored before the creation-time check reach the builder unchecked.
     with pytest.raises(ValueError) as error:
         ContainerCommandBuilder(container_type).with_image(image)
-    assert image not in str(error.value)
+    if image != "/":  # "/" is in the message itself
+        assert image not in str(error.value)
 
 
 @pytest.mark.parametrize("container_type", CONTAINER_TYPES)

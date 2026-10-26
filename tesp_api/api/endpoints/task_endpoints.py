@@ -62,7 +62,9 @@ async def create_task(
         return get_response_for_error_model(get_error_response_model(
             HTTPStatus.BAD_REQUEST,
             message=f"Invalid value in {', '.join(invalid_container_fields)}: environment variable names must "
-                    f"match [A-Za-z_][A-Za-z0-9_]*, images must not start with '-', and input paths, volumes and "
+                    f"match [A-Za-z_][A-Za-z0-9_]*, images must be registry images (not host paths, not starting "
+                    f"with '-', and the only URI schemes allowed are docker://, library://, shub:// and oras://), "
+                    f"and input paths, volumes and "
                     f"the directories of output paths must not contain ':' or ','."))
     task_to_create = RegisteredTesTask(
         **tes_task.dict(),

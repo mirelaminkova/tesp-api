@@ -304,7 +304,8 @@ def test_host_path_image_rejected(image):
     resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
     assert resp.status_code == 400
     assert "executors[0].image" in resp.text
-    assert image not in resp.text.replace("executors[0].image", "")
+    if image != "/":
+        assert image not in resp.text
 
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
