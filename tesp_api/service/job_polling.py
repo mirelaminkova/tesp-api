@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 from dataclasses import dataclass, fields
 from functools import lru_cache
@@ -38,10 +39,10 @@ class StatusPolling:
     error_retry_seconds: float = 600
 
     def __post_init__(self):
-        for field in fields(self):
-            value = getattr(self, field.name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ValueError(f'pulsar.status.{field.name} must be a number, got {value!r}')
+        for setting in fields(self):
+            value = getattr(self, setting.name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f'pulsar.status.{setting.name} must be a finite number, got {value!r}')
         if self.poll_interval <= 0:
             raise ValueError(f'pulsar.status.poll_interval must be positive, got {self.poll_interval!r}')
         if self.max_poll_interval < self.poll_interval:
@@ -58,8 +59,12 @@ def load_status_polling(props=None) -> StatusPolling:
     if status.get('max_polls') is not None:
         logger.warning('pulsar.status.max_polls is deprecated and ignored: tesp-api now waits until the Pulsar job '
                        'finishes. Set pulsar.status.max_wait_seconds to limit how long a task may run.')
-    return StatusPolling(**{field.name: status[field.name] for field in fields(StatusPolling)
-                            if status.get(field.name) is not None})
+    settings = {setting.name: status[setting.name] for setting in fields(StatusPolling)
+                if status.get(setting.name) is not None}
+    if 'max_poll_interval' not in settings and isinstance(settings.get('poll_interval'), (int, float)):
+        # A poll_interval above the default cap, set before max_poll_interval existed, stays a fixed interval.
+        settings['max_poll_interval'] = max(StatusPolling.max_poll_interval, settings['poll_interval'])
+    return StatusPolling(**settings)
 
 
 @lru_cache(maxsize=1)

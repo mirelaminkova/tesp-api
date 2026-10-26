@@ -90,13 +90,6 @@ def test_job_completes_after_more_polls_than_the_old_limit():
     assert clock.now > 400 * 4
 
 
-def test_job_completes_after_hours():
-    pulsar = FakePulsar(*([RUNNING] * 600), DONE)
-    status, clock = _poll(pulsar, StatusPolling(poll_interval=4, max_poll_interval=60))
-    assert status == DONE
-    assert clock.now > 9 * 3600
-
-
 def test_first_poll_waits_the_base_interval():
     status, clock = _poll(FakePulsar(DONE), StatusPolling(poll_interval=4))
     assert clock.sleeps == [4]
@@ -164,10 +157,6 @@ def test_zero_retry_window_fails_on_the_first_error():
 
 # --- Optional cap -----------------------------------------------------------------------------------------------------
 
-def test_no_cap_by_default():
-    assert StatusPolling().max_wait_seconds == 0
-
-
 def test_cap_stops_polling():
     pulsar = FakePulsar(RUNNING)
     clock = FakeClock()
@@ -204,6 +193,7 @@ def test_timeout_cancels_the_pulsar_job_and_records_system_error(monkeypatch):
 
     assert erased == ['abc']
     [(query, update)] = updates
+    assert query == {'_id': 'abc', 'state': {'$ne': TesTaskState.CANCELED}}  # a user's cancel wins
     assert update['$set'] == {'state': TesTaskState.SYSTEM_ERROR}
     syslog = update['$push']['logs.$[].system_logs']
     assert 'pulsar.status.max_wait_seconds' in syslog
@@ -241,12 +231,13 @@ def _props(**status):
 
 
 def test_defaults():
-    polling = load_status_polling(_props())
-    assert polling == StatusPolling()
-    assert polling.poll_interval == 4
-    assert polling.max_poll_interval == 60
-    assert polling.max_wait_seconds == 0
-    assert polling.error_retry_seconds == 600
+    assert load_status_polling(_props()) == StatusPolling(
+        poll_interval=4, max_poll_interval=60, max_wait_seconds=0, error_retry_seconds=600)
+
+
+def test_long_legacy_poll_interval_still_starts():
+    # Configs from before max_poll_interval keep their fixed interval instead of failing at startup.
+    assert load_status_polling(_props(poll_interval=120)).max_poll_interval == 120
 
 
 def test_settings_are_read():
@@ -261,7 +252,8 @@ def test_repo_settings_toml_is_valid():
 
 
 @pytest.mark.parametrize("status", [
-    {'poll_interval': 0}, {'poll_interval': -1}, {'poll_interval': 'often'},
+    {'poll_interval': 0}, {'poll_interval': -1}, {'poll_interval': 'often'}, {'poll_interval': True},
+    {'poll_interval': float('nan')}, {'max_wait_seconds': float('nan')}, {'max_wait_seconds': float('inf')},
     {'poll_interval': 10, 'max_poll_interval': 5},
     {'max_wait_seconds': -1}, {'error_retry_seconds': -1},
 ])
@@ -329,7 +321,7 @@ def _operations(kind, session, url, polling=FAST):
 
 
 @pytest.mark.parametrize("kind", ["rest", "amqp"])
-def test_operations_poll_past_the_old_limit_and_retry_5xx(kind):
+def test_operations_poll_until_complete_and_retry_5xx(kind):
     answers = [RUNNING_JSON] * 5 + [(503, 'Service Unavailable'), (500, '<html>error</html>')] + \
               [RUNNING_JSON] * 5 + [DONE_JSON]
     result = {}
@@ -346,7 +338,7 @@ def test_operations_poll_past_the_old_limit_and_retry_5xx(kind):
 @pytest.mark.parametrize("kind", ["rest", "amqp"])
 def test_operations_do_not_retry_4xx(kind):
     async def scenario(session, url):
-        with pytest.raises(PulsarLayerConnectionError):
+        with pytest.raises(PulsarOperationsError):  # the task is failed and its Pulsar job canceled
             await _operations(kind, session, url).job_status_complete('job1', _never_canceled)
 
     requests = asyncio.run(_with_status_stub([(404, 'Not Found')], scenario))
@@ -366,6 +358,11 @@ def test_operations_stop_polling_when_canceled(kind):
 
 
 @pytest.mark.parametrize("kind", ["rest", "amqp"])
-def test_operations_default_to_the_configured_polling(kind):
-    from tesp_api.service.job_polling import get_status_polling
-    assert _operations(kind, None, 'http://pulsar', None).status_polling == get_status_polling()
+@pytest.mark.parametrize("body", ['{"error": "no such job"}', '[]'])
+def test_operations_fail_on_a_status_without_complete(kind, body):
+    # Polling must not wait forever for a 'complete' key Pulsar never sends.
+    async def scenario(session, url):
+        with pytest.raises(PulsarOperationsError):
+            await _operations(kind, session, url).job_status_complete('job1', _never_canceled)
+
+    assert len(asyncio.run(_with_status_stub([(200, body)], scenario))) == 1

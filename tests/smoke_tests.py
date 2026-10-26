@@ -318,7 +318,11 @@ def test_task_cancel():
     assert _wait_for_pulsar_cancel(task_id, 60)
 
 def _wait_for_pulsar_cancel(task_id, timeout):
-    """Whether tesp-api asked Pulsar to cancel the task's job (its DEBUG log names each Pulsar request)."""
+    """Whether tesp-api asked Pulsar to cancel the task's job.
+
+    Reads the DEBUG log line of each Pulsar request (log_pulsar_request), so it needs the compose container name
+    tesp-api, logging.level = "DEBUG" and Pulsar's REST interface (over AMQP, cancel is a queue message).
+    """
     for _ in range(timeout):
         logs = subprocess.run(["docker", "logs", "tesp-api"], capture_output=True, text=True)
         if f"/jobs/{task_id}/cancel>" in logs.stdout + logs.stderr:

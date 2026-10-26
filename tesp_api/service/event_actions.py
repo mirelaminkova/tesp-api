@@ -281,6 +281,7 @@ async def handle_run_task(event: Event) -> None:
 
         if current_task_obj.state == TesTaskState.CANCELED:
             logger.warning(f"Task {task_id} found CANCELED after job completion polling. Aborting state changes.")
+            await pulsar_cancel_task_promise(str(task_id), pulsar_operations)  # erase the finished job's files
             return
 
         if command_status.get('returncode', -1) != 0:

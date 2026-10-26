@@ -47,11 +47,13 @@ class UnsupportedProtocolError(Exception):
         super().__init__()
 
 
-def repo_update_error_task_promise(task_id: ObjectId, state: TesTaskState, sys_log: Maybe[str]):
+def repo_update_error_task_promise(task_id: ObjectId, state: TesTaskState, sys_log: Maybe[str],
+                                   unless_canceled: bool = False):
     update_query = {
         '$set': {'state': state},
         **sys_log.maybe({}, lambda x: {'$push': {'logs.$[].system_logs': x}})}
-    return task_repository.update_task({'_id': task_id}, update_query)\
+    search_query = {'_id': task_id, **({'state': {'$ne': TesTaskState.CANCELED}} if unless_canceled else {})}
+    return task_repository.update_task(search_query, update_query)\
         .catch(lambda _error: logger.error(
             f'Failed to update task [id: {task_id}] to reflect its real state after error '
             f'occurred while executing one of the pulsar events'
@@ -92,9 +94,10 @@ def pulsar_event_handle_error(error: Exception, task_id: ObjectId,
             logger.warning(f'Task [id: {task_id_str}] reached the wait limit while executing event '
                            f'[event_name: {event_name}, msg: {timeout_error}]. Will cancel its Pulsar job and set '
                            f'the task to SYSTEM_ERROR.')
-            syslog: Maybe[str] = Just(f'{timeout_error}; the Pulsar job was canceled')
+            syslog: Maybe[str] = Just(f'{timeout_error}; tesp-api asked Pulsar to cancel the job')
             return pulsar_cancel_task_promise(task_id_str, pulsar_operations)\
-                .then(lambda ignored: repo_update_error_task_promise(task_id, TesTaskState.SYSTEM_ERROR, syslog))
+                .then(lambda ignored: repo_update_error_task_promise(
+                    task_id, TesTaskState.SYSTEM_ERROR, syslog, unless_canceled=True))
 
         case PulsarLayerConnectionError() as pulsar_layer_connection_error:
             logger.opt(exception=True).error(f'Pulsar connection error occurred while executing task event [event_name: {event_name}, '

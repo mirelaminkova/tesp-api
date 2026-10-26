@@ -14,7 +14,7 @@ from loguru import logger
 
 from tesp_api.repository.model.task import TesTaskIOType
 from tesp_api.service.client.client_s3 import redact_presigned_urls
-from tesp_api.service.job_polling import StatusPolling, get_status_polling, poll_until_complete
+from tesp_api.service.job_polling import StatusPolling, poll_until_complete
 
 
 # Pulsar returns job_stdout/job_stderr untruncated; keep the tail so task documents stay small
@@ -104,16 +104,25 @@ class PulsarOperations(ABC):
     def run_job(self, job_id: ObjectId, run_command: str, submit_params: Optional[dict] = None):
         """Submits the job; ``submit_params`` (e.g. ``native_specification``) go to Pulsar's job manager."""
 
+    async def _job_status(self, job_id: str) -> dict:
+        try:
+            status = await self._pulsar_request(path=f'/jobs/{job_id}/status', method='GET', response_type='JSON',
+                                                raise_for_status=True)
+        except PulsarLayerConnectionError as error:
+            if error.transient:
+                raise
+            raise PulsarOperationsError(error)  # Pulsar refused the request (4xx); retrying will not help
+        if not isinstance(status, dict) or 'complete' not in status:
+            # Else polling would wait forever for a 'complete' that never comes.
+            raise PulsarOperationsError(ValueError(f'unexpected job status answer of type {type(status).__name__}'))
+        return status
+
     async def job_status_complete(self, job_id: str, is_canceled: Callable[[], Awaitable[bool]]) -> dict:
         """Waits for the job to finish and returns its Pulsar status (see ``poll_until_complete``).
 
         Both implementations read the status from Pulsar's REST API."""
-        return await poll_until_complete(
-            lambda: self._pulsar_request(path=f'/jobs/{job_id}/status', method='GET', response_type='JSON',
-                                         raise_for_status=True),
-            is_canceled, self.status_polling,
-            is_transient=is_transient_pulsar_error,
-            job_id=job_id)
+        return await poll_until_complete(lambda: self._job_status(job_id), is_canceled, self.status_polling,
+                                         is_transient=is_transient_pulsar_error, job_id=job_id)
 
     @abstractmethod
     def upload(self, job_id: ObjectId, io_type: TesTaskIOType, file_path: str, file_content: Maybe[str]): pass
@@ -123,10 +132,10 @@ class PulsarOperations(ABC):
 
 class PulsarRestOperations(PulsarOperations):
 
-    def __init__(self, pulsar_client: ClientSession, base_url: str, status_polling: Optional[StatusPolling] = None):
+    def __init__(self, pulsar_client: ClientSession, base_url: str, status_polling: StatusPolling):
         self.pulsar_client = pulsar_client
         self.base_url = base_url
-        self.status_polling = status_polling or get_status_polling()
+        self.status_polling = status_polling
 
     @staticmethod
     def _reraise_custom(error: Exception):
@@ -194,11 +203,11 @@ class PulsarRestOperations(PulsarOperations):
 
 class PulsarAmqpOperations(PulsarOperations):
     def __init__(self, amqp_url: str, pulsar_client: ClientSession, base_url: str,
-                 status_polling: Optional[StatusPolling] = None):
+                 status_polling: StatusPolling):
         self.amqp_url = amqp_url
         self.pulsar_client = pulsar_client
         self.base_url = base_url
-        self.status_polling = status_polling or get_status_polling()
+        self.status_polling = status_polling
         self.connection: aio_pika.RobustConnection | None = None
         self.channel: aio_pika.Channel | None = None
 

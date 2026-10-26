@@ -15,6 +15,7 @@ from yarl import URL
 from tesp_api.config.log_config import logg_configure
 from tesp_api.repository.model.task import TesTaskIOType
 from tesp_api.service.client.client_s3 import S3Config, presign_get_url, presign_s3_outputs, redact_presigned_urls
+from tesp_api.service.job_polling import StatusPolling
 from tesp_api.service.pulsar_operations import PulsarLayerConnectionError, PulsarOperationsError, \
     PulsarRestOperations, log_pulsar_request
 from tesp_api.utils.container import stage_out_script
@@ -124,7 +125,7 @@ async def _with_pulsar_stub(handler, scenario):
         trace_config = aiohttp.TraceConfig()
         trace_config.on_request_start.append(log_pulsar_request)
         async with aiohttp.ClientSession(trace_configs=[trace_config]) as session:
-            operations = PulsarRestOperations(session, str(server.make_url("")).rstrip("/"))
+            operations = PulsarRestOperations(session, str(server.make_url("")).rstrip("/"), StatusPolling())
             await scenario(operations, received)
     finally:
         await server.close()
