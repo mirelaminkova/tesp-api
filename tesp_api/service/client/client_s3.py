@@ -17,7 +17,8 @@ from tesp_api.utils.types import S3Url
 ADDRESSING_STYLES = {'path', 'virtual', 'auto'}
 MAX_PRESIGN_EXPIRY_SECONDS = 7 * 24 * 3600  # SigV4 limit
 
-_PRESIGNED_SECRET_PARAMS = re.compile(r'(X-Amz-(?:Credential|Signature|Security-Token)=)[^&\s\'"]+')
+# Query parameters of presigned URLs and form fields of presigned POSTs (lower case), e.g. `x-amz-signature=...`.
+_PRESIGNED_SECRET_PARAMS = re.compile(r'((?i:X-Amz-(?:Credential|Signature|Security-Token))=)[^&\s\'"]+')
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class S3Config:
     secret_access_key: Optional[str] = field(default=None, repr=False)
     addressing_style: str = 'path'
     presign_expiry_seconds: int = 3600
+    output_presign_expiry_seconds: int = 24 * 3600
 
     def __post_init__(self):
         # Messages must never include the secret key.
@@ -45,6 +47,8 @@ class S3Config:
             raise ValueError('s3.access_key_id and s3.secret_access_key must be set together')
         if not 0 < self.presign_expiry_seconds <= MAX_PRESIGN_EXPIRY_SECONDS:
             raise ValueError(f's3.presign_expiry_seconds must be between 1 and {MAX_PRESIGN_EXPIRY_SECONDS}')
+        if not 0 < self.output_presign_expiry_seconds <= MAX_PRESIGN_EXPIRY_SECONDS:
+            raise ValueError(f's3.output_presign_expiry_seconds must be between 1 and {MAX_PRESIGN_EXPIRY_SECONDS}')
 
     @property
     def signed(self) -> bool:
@@ -65,7 +69,8 @@ def load_s3_config(props=None) -> S3Config:
         access_key_id=setting('access_key_id'),
         secret_access_key=setting('secret_access_key'),
         addressing_style=setting('addressing_style') or 'path',
-        presign_expiry_seconds=int(setting('presign_expiry_seconds') or 3600))
+        presign_expiry_seconds=int(setting('presign_expiry_seconds') or 3600),
+        output_presign_expiry_seconds=int(setting('output_presign_expiry_seconds') or 24 * 3600))
 
 
 @lru_cache(maxsize=1)
@@ -126,8 +131,64 @@ def presign_s3_inputs(input_confs: List[dict], config: Optional[S3Config] = None
     return staged
 
 
+def presign_put_url(s3_url: S3Url, config: Optional[S3Config] = None) -> str:
+    """
+    Returns an http(s) URL to which the object can be uploaded with ``PUT`` without credentials, valid for
+    ``output_presign_expiry_seconds``. Outputs are uploaded after the executors finish, so this lifetime must cover the
+    whole run of the task.
+    """
+    _require_plain(s3_url)
+    config = config or get_s3_config()
+    return _presign_client(config).generate_presigned_url(
+        'put_object',
+        Params={'Bucket': s3_url.bucket, 'Key': s3_url.key},
+        ExpiresIn=config.output_presign_expiry_seconds)
+
+
+def presign_post_policy(s3_url: S3Url, config: Optional[S3Config] = None) -> dict:
+    """
+    Returns a presigned POST (browser-based upload) that allows uploading any number of objects whose keys start with
+    the key of ``s3_url`` followed by ``/``, valid for ``output_presign_expiry_seconds``. Used for DIRECTORY outputs,
+    whose file names are only known after the task ran.
+
+    Result: ``url`` to POST to, ``fields`` to send before the file (policy and signature), and ``key_prefix``; the
+    ``key`` field, which must start with ``key_prefix``, is added per file.
+    """
+    _require_plain(s3_url)
+    config = config or get_s3_config()
+    key_prefix = s3_url.key.rstrip('/') + '/'
+    # A key ending in ${filename} makes botocore add the condition ["starts-with", "$key", key_prefix].
+    post = _presign_client(config).generate_presigned_post(
+        s3_url.bucket, key_prefix + '${filename}', ExpiresIn=config.output_presign_expiry_seconds)
+    fields = {name: value for name, value in post['fields'].items() if name != 'key'}
+    return {'url': post['url'], 'fields': fields, 'key_prefix': key_prefix}
+
+
+def presign_s3_outputs(output_confs: List[dict], config: Optional[S3Config] = None) -> List[dict]:
+    """
+    Returns a copy of the stage-out ``output_confs`` in which S3 outputs are replaced by presigned uploads, marked with
+    ``'presigned': True``: a FILE gets a presigned ``PUT`` URL (``'upload': 's3_put'``), a DIRECTORY a presigned POST
+    policy for its key prefix (``'upload': 's3_post'`` with ``form_fields`` and ``key_prefix``).
+    """
+    staged = []
+    for conf in output_confs:
+        url = conf.get('url')
+        if isinstance(url, S3Url):
+            if conf.get('type') == TesTaskIOType.DIRECTORY:
+                post = presign_post_policy(url, config)
+                conf = {**conf, 'url': post['url'], 'upload': 's3_post', 'form_fields': post['fields'],
+                        'key_prefix': post['key_prefix'], 'presigned': True}
+            else:
+                conf = {**conf, 'url': presign_put_url(url, config), 'upload': 's3_put', 'presigned': True}
+        staged.append(conf)
+    return staged
+
+
 def redact_presigned_urls(text: str) -> str:
-    """Hides the access key id, signature and session token of presigned URLs in ``text`` (for logging)."""
+    """
+    Hides the access key id, signature and session token of presigned URLs and presigned POST fields in ``text``
+    (for logging).
+    """
     return _PRESIGNED_SECRET_PARAMS.sub(r'\1REDACTED', text)
 
 

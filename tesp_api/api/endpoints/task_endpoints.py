@@ -48,7 +48,7 @@ async def create_task(
         return get_response_for_error_model(get_error_response_model(
             HTTPStatus.BAD_REQUEST,
             message=f"Unsupported S3 URL in {', '.join(unsupported_s3_urls)}: use s3://bucket/key (S3 directory "
-                    f"inputs and S3 outputs are not supported yet). "
+                    f"inputs are not supported yet). "
                     f"Credentials, host and port in S3 URLs are not accepted; the S3 endpoint and "
                     f"credentials are configured on the server."))
     task_to_create = RegisteredTesTask(

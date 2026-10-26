@@ -337,26 +337,9 @@ def stage_out_command(
         .with_workdir(executor.workdir) \
         .with_resource(resource_conf)
 
-    commands = []
-    for output in output_confs:
-        path = output['container_path']
-        url = output['url']
-        output_type = output.get('type', TesTaskIOType.FILE)
-        
-        if output_type == TesTaskIOType.DIRECTORY:
-            # Recursive upload
-            cmd = (
-                f"find {shlex.quote(path)} -type f -exec "
-                f"curl -f -X POST -F 'file=@{{}}' {shlex.quote(url)} \\;"
-            )
-        else:
-            # Single file upload
-            cmd = f"curl -f -X POST -F 'file=@{shlex.quote(path)}' {shlex.quote(url)}"
-        
-        commands.append(cmd)
-    
-    if commands:
-        builder.with_command(["sh", "-c", " && ".join(commands)])
+    script = stage_out_script(output_confs)
+    if script:
+        builder.with_command(["sh", "-c", script])
 
     # Mount required directories
     if container_type == "singularity" and bind_mount:
@@ -371,6 +354,61 @@ def stage_out_command(
             builder.with_env(env_name, env_value)
 
     return builder.get_run_command()
+
+def _curl_quoted(value: str) -> str:
+    """``value`` as a double-quoted file name in a ``curl -F`` argument, so ``;`` and ``,`` are not parsed."""
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+
+# In the directory loop below: $f is ./<relative path>, $r the relative path, $q the relative path escaped for
+# curl -F (see _curl_quoted).
+_DIRECTORY_LOOP = (
+    'for f; do r=${f#./}; q=$(printf "%s" "$r" | sed \'s/[\\\\"]/\\\\&/g\'); {upload} || exit 1; done'
+)
+
+
+def _file_upload(conf: dict, path: str) -> str:
+    url = shlex.quote(conf['url'])
+    if conf.get('upload') == 's3_put':
+        return f"curl -fsS -T {shlex.quote(path)} {url}"
+    # Multipart POST; the file name sent is the base name of the path.
+    return f"curl -fsS -X POST -F {shlex.quote('file=@' + _curl_quoted(path))} {url}"
+
+
+def _directory_upload(conf: dict, path: str) -> str:
+    url = shlex.quote(conf['url'])
+    if conf.get('upload') == 's3_post':
+        # --form-string sends values literally. S3 ignores fields after the file, so the file goes last.
+        fields = [f"--form-string key={shlex.quote(conf['key_prefix'])}\"$r\""] + [
+            f"--form-string {shlex.quote(f'{name}={value}')}" for name, value in conf['form_fields'].items()]
+        upload = f"curl -fsS {' '.join(fields)} -F \"file=@\\\"$q\\\"\" {url}"
+    else:
+        # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
+        upload = f"curl -fsS -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
+    loop = _DIRECTORY_LOOP.replace("{upload}", upload)
+    # -L uploads the targets of symbolic links, as for FILE outputs.
+    return f"( cd {shlex.quote(path)} && find -L . -type f -exec sh -c {shlex.quote(loop)} sh {{}} + )"
+
+
+def stage_out_script(output_confs: List[dict]) -> str:
+    """
+    Shell script that uploads the outputs, run in the stage-out container after the executors. HTTP(S) outputs are
+    sent as multipart ``POST`` (form field ``file``), S3 outputs (see ``presign_s3_outputs``) with a presigned ``PUT``
+    (FILE) or presigned POST policy (DIRECTORY). DIRECTORY outputs upload every file below the directory, keeping
+    their relative paths. Outputs whose path does not exist are skipped with a message on stderr: TES has no notion of
+    optional outputs, and clients such as Nextflow check for missing outputs themselves. A failed upload fails the
+    script.
+    """
+    commands = []
+    for conf in output_confs:
+        path = conf['container_path']
+        if conf.get('type', TesTaskIOType.FILE) == TesTaskIOType.DIRECTORY:
+            test, upload = '-d', _directory_upload(conf, path)
+        else:
+            test, upload = '-e', _file_upload(conf, path)
+        skipped = shlex.quote(f"tesp-api: output {path} not found, skipped")
+        commands.append(f"if [ {test} {shlex.quote(path)} ]; then {upload}; else echo {skipped} >&2; fi")
+    return " && ".join(commands)
 
 def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):
     output_confs: List[dict] = []
