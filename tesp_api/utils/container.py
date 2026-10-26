@@ -200,8 +200,9 @@ class ContainerCommandBuilder:
             env_prefix = []
         else:
             # `singularity exec --env` parses its value as CSV and trims quotes, so values go through the
-            # environment instead. Apptainer prefers APPTAINERENV_ and logs a notice for SINGULARITYENV_ alone;
-            # SingularityCE only reads SINGULARITYENV_. Apptainer accepts both when the values are equal.
+            # environment instead. SingularityCE only reads SINGULARITYENV_; Apptainer reads both and logs a
+            # notice for SINGULARITYENV_ unless APPTAINERENV_ holds the same value (warnDeprecatedEnvUsage in
+            # apptainer internal/pkg/util/env/create.go).
             env_flags = []
             env_prefix = [f"{prefix}{k}={shlex.quote(v)}"
                           for k, v in self._envs.items() for prefix in SINGULARITY_ENV_PREFIXES]
@@ -236,7 +237,8 @@ class ContainerCommandBuilder:
         " ".join(shlex.quote(arg) for arg in cmd) if isinstance(cmd, list) else cmd)
 
         # Build final command
-        runtime = "docker run" if docker else "singularity exec"
+        # --no-eval: Apptainer otherwise shell-evaluates env values inside the container, unlike docker
+        runtime = "docker run" if docker else "singularity exec --no-eval"
         container_cmd = " ".join(filter(None, [
             *env_prefix, runtime, cpu_flag, mem_flag, workdir_flag, *env_flags, *mount_flags, image, command_str]))
         return " && ".join([*mkdir_cmds, container_cmd])

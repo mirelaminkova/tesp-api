@@ -28,6 +28,13 @@ def test_image_starting_with_dash_names_the_field():
 @pytest.mark.parametrize("path", ["/data/a:b", "/data/a,/etc:/x"])
 def test_mount_separator_in_paths_names_the_field(path):
     task = _task(inputs=[{"path": "/ok", "url": "http://example.org/in"}, {"path": path, "content": "x"}],
-                 outputs=[{"path": path, "url": "http://example.org/upload", "type": "FILE"}],
                  volumes=["/ok", path])
-    assert find_invalid_container_fields(task) == ["inputs[1].path", "outputs[0].path", "volumes[1]"]
+    assert find_invalid_container_fields(task) == ["inputs[1].path", "volumes[1]"]
+    task = _task(outputs=[{"path": f"{path}/out", "url": "http://example.org/upload", "type": "FILE"}])
+    assert find_invalid_container_fields(task) == ["outputs[0].path"]
+
+
+def test_mount_separator_in_output_file_name_is_allowed():
+    # Outputs are mounted by their directory only
+    task = _task(outputs=[{"path": "/data/sample:1,2.txt", "url": "http://example.org/upload", "type": "FILE"}])
+    assert find_invalid_container_fields(task) == []

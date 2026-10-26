@@ -21,7 +21,7 @@ from tesp_api.repository.model.task import TesTaskExecutor, TesTaskIOType
 from tesp_api.utils.container import ContainerCommandBuilder, run_command, stage_in_command, stage_out_command
 
 CONTAINER_TYPES = ["docker", "singularity"]
-MARKER = "/tmp/tesp-api-quoting-test-pwned"
+MARKER = f"/tmp/tesp-api-quoting-test-pwned-{os.getpid()}"
 
 HOSTILE = [
     f"$(touch {MARKER})",
@@ -132,6 +132,12 @@ def test_several_env_vars_are_passed_intact(container_type, tmp_path):
 def test_invalid_env_name_is_rejected(container_type, name):
     with pytest.raises(ValueError):
         _builder(container_type).with_env(name, "value").get_run_command()
+
+
+def test_singularity_does_not_evaluate_env_values():
+    # Apptainer shell-evaluates injected env values inside the container unless --no-eval is given
+    tokens = shlex.split(_builder("singularity").with_env("VAR", "$(id)").get_run_command())
+    assert tokens[tokens.index("exec") + 1] == "--no-eval"
 
 
 # --- workdir -----------------------------------------------------------------------------------------------
