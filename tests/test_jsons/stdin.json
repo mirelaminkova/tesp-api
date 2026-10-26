@@ -1,0 +1,20 @@
+{
+  "inputs": [
+    {
+      "path": "/data/stdin.txt",
+      "content": "hello-world-stdin\n",
+      "type": "FILE"
+    }
+  ],
+  "executors": [
+    {
+      "image": "ubuntu",
+      "command": [
+        "tr",
+        "a-z",
+        "A-Z"
+      ],
+      "stdin": "/data/stdin.txt"
+    }
+  ]
+}

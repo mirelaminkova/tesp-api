@@ -1,0 +1,28 @@
+{
+  "outputs": [
+    {
+      "path": "/outputs/stdout-test",
+      "url": "http://172.17.0.1:5000/upload",
+      "type": "FILE"
+    }
+  ],
+  "executors": [
+    {
+      "image": "ubuntu",
+      "command": [
+        "echo",
+        "hello-world-stdout"
+      ],
+      "stdout": "/outputs/stdout-test"
+    },
+    {
+      "image": "ubuntu",
+      "command": [
+        "grep",
+        "-Fxq",
+        "hello-world-stdout",
+        "/outputs/stdout-test"
+      ]
+    }
+  ]
+}

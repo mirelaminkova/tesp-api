@@ -11,6 +11,14 @@ from tesp_api.utils.functional import get_else_throw, maybe_of
 
 SHELL_PATTERN = re.compile(r"[|&;<>(){}$*?\"'\\]")
 
+# Max bytes of a redirected executor stdout/stderr file echoed back to the job's own streams,
+# so it also lands in TesTaskExecutorLog.stdout/stderr (TES: "no guarantees are made about how
+# much of the stream is captured").
+STDIO_LOG_TAIL_BYTES = 64 * 1024
+# Keeps tab, LF, CR and printable ASCII: Pulsar decodes job output as strict UTF-8, so binary data
+# or a tail cut inside a multi-byte character would break its job status endpoint.
+ASCII_TEXT_FILTER = r"LC_ALL=C tr -cd '\11\12\15\40-\176'"
+
 class ContainerCommandBuilder:
     def __init__(self, container_type: str) -> None:
         self.container_type = container_type
@@ -79,9 +87,15 @@ class ContainerCommandBuilder:
         self._stdin = stdin
         self._stdout = stdout
         self._stderr = stderr
-        
+
         if not command:
             self._command = Nothing
+            return self
+
+        # Stream redirections need a shell inside the container; the argv is passed as
+        # positional parameters ("$@") so it is never interpreted by that shell.
+        if self._has_stdio():
+            self._command = Just(["sh", "-c", self._stdio_script(), "sh", *map(str, command)])
             return self
 
         # Check if already wrapped in shell
@@ -92,18 +106,10 @@ class ContainerCommandBuilder:
         # Wrap in shell if needed
         if self.requires_shell(command) or self.container_type == "singularity":
             shell_cmd = " ".join(shlex.quote(str(arg)) for arg in command)
-            shell_cmd = self._escape_redirections(
-                shell_cmd,
-                self._stdin,
-                self._stdout,
-                self._stderr
-            )
             self._command = Just(["sh", "-c", shell_cmd])
         else:
-            cmd = list(map(str, command))
-            cmd = self._add_redirections(cmd)
-            self._command = Just(cmd)
-            
+            self._command = Just(list(map(str, command)))
+
         return self
 
     def _is_shell_wrapped(self, command) -> bool:
@@ -117,34 +123,42 @@ class ContainerCommandBuilder:
             for arg in command
         )
 
-    def _escape_redirections(self, cmd: str, stdin, stdout, stderr) -> str:
-        redirections = [
-            ('<', stdin),
-            ('>', stdout),
-            ('2>', stderr),
-        ]
-        for op, val in redirections:
-            if val and val != Nothing:
-                path = val.maybe("", lambda x: x)
-                if path:
-                    cmd += f" {op} {shlex.quote(path)}"
-        return cmd
+    @staticmethod
+    def _path(stream: Maybe[str]) -> str:
+        return stream.maybe("", lambda x: x)
 
-    def _add_redirections(self, cmd: List[str]) -> List[str]:
-        redirections = []
-        if self._stdin != Nothing:
-            path = self._stdin.maybe("", lambda x: x)
-            if path:
-                redirections.extend(["<", path])
-        if self._stdout != Nothing:
-            path = self._stdout.maybe("", lambda x: x)
-            if path:
-                redirections.extend([">", path])
-        if self._stderr != Nothing:
-            path = self._stderr.maybe("", lambda x: x)
-            if path:
-                redirections.extend(["2>", path])
-        return cmd + redirections
+    def _has_stdio(self) -> bool:
+        return any(self._path(stream) for stream in (self._stdin, self._stdout, self._stderr))
+
+    def _stdio_script(self) -> str:
+        stdin, stdout, stderr = (self._path(s) for s in (self._stdin, self._stdout, self._stderr))
+        same_file = bool(stdout) and stdout == stderr
+
+        redirections = [f"{op} {shlex.quote(path)}" for op, path in
+                        (("<", stdin), (">", stdout), ("2>", "" if same_file else stderr)) if path]
+        if same_file:
+            redirections.append("2>&1")
+
+        # sh runs as PID 1 in the container, which ignores SIGTERM unless trapped, so run the
+        # command in the background and forward termination to it (e.g. on task cancel).
+        script = [
+            " ".join(['"$@"', *redirections]) + " & pid=$!",
+            "trap 'kill -TERM $pid 2>/dev/null' TERM INT HUP",
+            "wait $pid",
+            "rc=$?",
+            # wait returns early when a trapped signal arrives; keep waiting for the real exit code
+            "while kill -0 $pid 2>/dev/null; do wait $pid; rc=$?; done",
+        ]
+        # Echo the tail of redirected files to the job's streams so ExecutorLog still gets them.
+        if stdout:
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stdout)} 2>/dev/null"
+                          f" | {ASCII_TEXT_FILTER} 2>/dev/null")
+        if stderr and not same_file:
+            # >&2 before 2>/dev/null: the copy goes to the original stderr, tr's own errors are dropped
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stderr)} 2>/dev/null"
+                          f" | {ASCII_TEXT_FILTER} >&2 2>/dev/null")
+        script.append("exit $rc")
+        return "; ".join(script)
 
     def reset(self) -> None:
         self._resource_cpu = Nothing
@@ -236,12 +250,6 @@ def stage_in_command(
     input_confs: List[dict],
     container_type: str
 ) -> str:
-    builder = ContainerCommandBuilder(container_type) \
-        .with_image(executor.image) \
-        .with_workdir(executor.workdir) \
-        .with_resource(resource_conf) \
-        .with_directory(bind_mount)
-
     commands = []
     for input_conf in input_confs:
         url = input_conf.get('url')
@@ -262,8 +270,16 @@ def stage_in_command(
             # Single file download
             commands.append(f"curl -f -o {shlex.quote(filename)} {shlex.quote(url)}")
     
-    if commands:
-        builder.with_command(["sh", "-c", " && ".join(commands)])
+    # Inline (content) inputs are uploaded to Pulsar directly, so there may be nothing to download
+    if not commands:
+        return ""
+
+    builder = ContainerCommandBuilder(container_type) \
+        .with_image(executor.image) \
+        .with_workdir(executor.workdir) \
+        .with_resource(resource_conf) \
+        .with_directory(bind_mount) \
+        .with_command(["sh", "-c", " && ".join(commands)])
 
     builder.with_bind_mount(executor.workdir, bind_mount)
     
