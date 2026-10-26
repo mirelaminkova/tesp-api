@@ -15,6 +15,9 @@ SHELL_PATTERN = re.compile(r"[|&;<>(){}$*?\"'\\]")
 # so it also lands in TesTaskExecutorLog.stdout/stderr (TES: "no guarantees are made about how
 # much of the stream is captured").
 STDIO_LOG_TAIL_BYTES = 64 * 1024
+# Keeps tab, LF, CR and printable ASCII: Pulsar decodes job output as strict UTF-8, so binary data
+# or a tail cut inside a multi-byte character would break its job status endpoint.
+ASCII_TEXT_FILTER = r"LC_ALL=C tr -cd '\11\12\15\40-\176'"
 
 class ContainerCommandBuilder:
     def __init__(self, container_type: str) -> None:
@@ -148,10 +151,9 @@ class ContainerCommandBuilder:
         ]
         # Echo the tail of redirected files to the job's streams so ExecutorLog still gets them.
         if stdout:
-            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stdout)} 2>/dev/null")
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stdout)} 2>/dev/null | {ASCII_TEXT_FILTER}")
         if stderr and not same_file:
-            # >&2 first sends tail's output to the original stderr, then 2>/dev/null silences its errors
-            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stderr)} >&2 2>/dev/null")
+            script.append(f"tail -c {STDIO_LOG_TAIL_BYTES} -- {shlex.quote(stderr)} 2>/dev/null | {ASCII_TEXT_FILTER} >&2")
         script.append("exit $rc")
         return "; ".join(script)
 
@@ -271,8 +273,10 @@ def stage_in_command(
             # Single file download
             commands.append(f"curl -f -o {shlex.quote(filename)} {shlex.quote(url)}")
     
-    if commands:
-        builder.with_command(["sh", "-c", " && ".join(commands)])
+    # Inline (content) inputs are uploaded to Pulsar directly, so there may be nothing to download
+    if not commands:
+        return ""
+    builder.with_command(["sh", "-c", " && ".join(commands)])
 
     builder.with_bind_mount(executor.workdir, bind_mount)
     

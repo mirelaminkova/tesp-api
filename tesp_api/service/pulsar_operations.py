@@ -2,7 +2,7 @@ import asyncio
 import json
 import aio_pika
 from enum import Enum
-from typing import Literal
+from typing import Literal, Tuple
 from abc import ABC, abstractmethod
 from urllib.parse import quote
 
@@ -12,6 +12,16 @@ from pymonad.promise import Promise
 from aiohttp import ClientSession, ClientError
 
 from tesp_api.repository.model.task import TesTaskIOType
+
+
+def job_output(status: dict) -> Tuple[str, str]:
+    """Stdout and stderr of a completed Pulsar job's command line.
+
+    Pulsar >= 0.15 reports them as `job_stdout`/`job_stderr`; its `stdout`/`stderr` are Galaxy's
+    tool_stdout/tool_stderr metadata files, which only older Pulsar filled from the command itself.
+    """
+    return (status.get('job_stdout') or status.get('stdout') or '',
+            status.get('job_stderr') or status.get('stderr') or '')
 
 
 class DataType(str, Enum):

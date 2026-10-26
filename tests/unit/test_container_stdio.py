@@ -164,7 +164,7 @@ def test_paths_with_special_characters(tmp_path):
 def test_log_copy_is_bounded(tmp_path):
     out = tmp_path / "out"
     size = STDIO_LOG_TAIL_BYTES * 3
-    result = _run(_build(["head", "-c", str(size), "/dev/zero"], stdout=Just(str(out))))
+    result = _run(_build(["sh", "-c", f"yes | head -c {size}"], stdout=Just(str(out))))
 
     assert result.returncode == 0
     assert out.stat().st_size == size

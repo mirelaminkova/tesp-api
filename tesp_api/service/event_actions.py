@@ -18,7 +18,7 @@ from tesp_api.service.event_handler import Event, local_handler
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.service.file_transfer_service import file_transfer_service
 from tesp_api.service.error import pulsar_event_handle_error, TaskNotFoundError, TaskExecutorError
-from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType
+from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType, job_output
 from tesp_api.repository.model.task import (
     TesTaskState,
     TesTaskExecutor,
@@ -256,7 +256,7 @@ async def handle_run_task(event: Event) -> None:
         await append_task_executor_logs(
             task_id, author, TesTaskState.RUNNING,
             command_start_time, command_end_time,
-            command_status.get('stdout', ''), command_status.get('stderr', ''),
+            *job_output(command_status),
             command_status.get('returncode', -1)
         )
 
