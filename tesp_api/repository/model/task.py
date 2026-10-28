@@ -1,8 +1,9 @@
 import os
+import posixpath
 import re
 from datetime import datetime
 from enum import Enum
-from typing import List, Dict, Union
+from typing import List, Dict, Optional, Union
 from pathlib import Path
 from bson.objectid import ObjectId
 from pydantic import BaseModel, Field
@@ -295,13 +296,28 @@ def has_registry_scheme(image: str) -> bool:
     return scheme is not None and scheme.group(1) in REGISTRY_IMAGE_SCHEMES
 
 
-def is_valid_image(image: str) -> bool:
+def is_allowed_host_image(image: str, allowed_image_dir: Optional[str]) -> bool:
+    """
+    Whether ``image`` names a pre-pulled image below ``allowed_image_dir`` (``container.allowed_image_dir``, Singularity
+    only; ``None`` or empty: none is allowed). The check is lexical, as the files are on the Pulsar host: the path must
+    be absolute, normalized (no ``.``, ``..``, ``//`` or trailing ``/``) and strictly below the directory. Symbolic links
+    are resolved on the Pulsar host before the image is run (see ``ContainerCommandBuilder``).
+    """
+    if not allowed_image_dir or not image.startswith("/"):
+        return False
+    return posixpath.normpath(image) == image and image.startswith(allowed_image_dir.rstrip("/") + "/")
+
+
+def is_valid_image(image: str, allowed_image_dir: Optional[str] = None) -> bool:
     """
     Accepts Docker references and ``docker://``, ``library://``, ``shub://`` and ``oras://`` URIs. Refuses images that
     would make the container runtime use files on the host: absolute paths (Singularity runs a host directory or
-    ``.sif`` file as the container, as the Pulsar user), relative paths (starting with ``.``) and other URI schemes.
+    ``.sif`` file as the container, as the Pulsar user), relative paths (starting with ``.``) and other URI schemes,
+    except paths that ``is_allowed_host_image`` accepts for ``allowed_image_dir``.
     Also refuses empty images and images starting with ``-``, which would be parsed as an option of ``docker run``.
     """
+    if is_allowed_host_image(image, allowed_image_dir):
+        return True
     if not image or image.startswith(("-", "/", ".")):
         return False
     return IMAGE_SCHEME_PATTERN.match(image) is None or has_registry_scheme(image)
@@ -311,18 +327,18 @@ def is_valid_mount_path(path: Union[str, Path]) -> bool:
     return not any(separator in str(path) for separator in MOUNT_PATH_SEPARATORS)
 
 
-def find_invalid_container_fields(task: TesTask) -> List[str]:
+def find_invalid_container_fields(task: TesTask, allowed_image_dir: Optional[str] = None) -> List[str]:
     """
     Returns the fields (e.g. ``executors[0].env``) holding values that cannot be passed safely to the container
     runtime: environment variable names not matching ``[A-Za-z_][A-Za-z0-9_]*``, images refused by
-    ``is_valid_image`` and mounted paths containing ``:`` or ``,`` (input paths, volumes and the directories of output
+    ``is_valid_image`` (for ``allowed_image_dir``) and mounted paths containing ``:`` or ``,`` (input paths, volumes and the directories of output
     paths, which are mounted as volumes). The values themselves are not returned.
     """
     invalid = []
     for i, executor in enumerate(task.executors):
         if not all(is_valid_env_name(name) for name in executor.env or {}):
             invalid.append(f"executors[{i}].env")
-        if not is_valid_image(executor.image):
+        if not is_valid_image(executor.image, allowed_image_dir):
             invalid.append(f"executors[{i}].image")
     invalid.extend(f"inputs[{i}].path" for i, item in enumerate(task.inputs or [])
                    if not is_valid_mount_path(item.path))

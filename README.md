@@ -283,8 +283,8 @@ Values that cannot be passed safely are refused with `400 Bad Request`, naming t
 - images must be registry images: a Docker reference such as `alpine:3.20`, or a `docker://`, `library://`,
   `shub://` or `oras://` URI. Empty images, host paths (`/images/x.sif`, `./x`, or any image starting with `/`, `.`
   or `-`), `instance://` and other URI schemes (matched case-sensitively) are refused, because Singularity would run
-  a host directory or file as the container, as the Pulsar user. Pre-pulled `.sif` images on the Pulsar host are not
-  supported;
+  a host directory or file as the container, as the Pulsar user. With Singularity, pre-pulled images can be allowed
+  from one directory, see below;
 - input paths, volumes and the directories of output paths must not contain `:` or `,`, which separate mount specs for
   Docker and Singularity.
 
@@ -292,6 +292,19 @@ With Singularity, environment variables are passed as `APPTAINERENV_<name>` and 
 with `--env`, which splits values on `,` and trims quotes, and `singularity exec` runs with `--no-eval` so values are
 not shell-evaluated inside the container either. This needs Apptainer 1.0+ or SingularityCE 3.10+. Apptainer treats
 the names `PATH`, `PREPEND_PATH` and `APPEND_PATH` specially and does not let tasks override `HOME` or `LD_LIBRARY_PATH`.
+
+#### Pre-pulled Singularity images
+`container.allowed_image_dir` (`TESP_API_CONTAINER__ALLOWED_IMAGE_DIR`, empty by default) names a directory on the
+Pulsar host holding pre-pulled images, e.g. `/srv/images`. Executors may then use an image file below it by absolute
+path, e.g. `/srv/images/tool.sif`. It only applies with `CONTAINER_TYPE=singularity`; it is ignored, with a warning, for
+Docker, which has no equivalent.
+- At task creation the path must be absolute, normalized (no `.`, `..`, `//` or trailing `/`) and below the directory;
+  `/srv/images/../etc`, `/srv/imagesX/x.sif` and `/srv/images` itself are refused.
+- On the Pulsar host the job resolves the image and the directory with `realpath` before `singularity exec` and runs
+  the resolved file only if it is a regular file below the directory: symbolic links may point within the directory,
+  not out of it, and directories (sandbox images) are refused. Otherwise the executor fails with a message on stderr.
+- Anyone who can submit tasks can run any image in the directory, and anyone who can write to it can change what
+  tasks run, so keep it writable by administrators only.
 
 &nbsp;
 ### Configuring required services

@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple, Optional, Union
 from pymonad.maybe import Nothing, Maybe, Just
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskOutput, TesTaskIOType, \
-    is_valid_env_name, is_valid_image, is_valid_mount_path, has_registry_scheme
+    is_valid_env_name, is_valid_image, is_valid_mount_path, has_registry_scheme, is_allowed_host_image
 from tesp_api.utils.resource_values import positive, ram_mib
 from tesp_api.utils.functional import get_else_throw, maybe_of
 
@@ -21,10 +21,29 @@ STDIO_LOG_TAIL_BYTES = 64 * 1024
 # Keeps tab, LF, CR and printable ASCII: Pulsar decodes job output as strict UTF-8, so binary data
 # or a tail cut inside a multi-byte character would break its job status endpoint.
 ASCII_TEXT_FILTER = r"LC_ALL=C tr -cd '\11\12\15\40-\176'"
+# A pre-pulled host image (container.allowed_image_dir) is resolved into this shell variable on the Pulsar host.
+HOST_IMAGE_VAR = "tesp_image"
+
+
+def host_image_check(image: str, allowed_image_dir: str) -> str:
+    """
+    Shell command run on the Pulsar host before ``singularity exec``: resolves ``image`` and ``allowed_image_dir``
+    (symbolic links, ``..``) with ``realpath -e`` and fails unless the image is then a regular file below the directory.
+    The resolved path is left in ``$tesp_image`` for ``singularity exec``, so a link changed afterwards is not followed.
+    Directories (sandbox images) are refused. The message does not name the path.
+    """
+    refused = shlex.quote("tesp-api: the executor image is not a file below container.allowed_image_dir")
+    return (f"{{ tesp_image_dir=$(realpath -e -- {shlex.quote(allowed_image_dir)} 2>/dev/null)"
+            f" && {HOST_IMAGE_VAR}=$(realpath -e -- {shlex.quote(image)} 2>/dev/null)"
+            f' && case "${HOST_IMAGE_VAR}" in "$tesp_image_dir"/*) [ -f "${HOST_IMAGE_VAR}" ] ;; *) false ;; esac'
+            f" || {{ echo {refused} >&2; false; }}; }}")
 
 class ContainerCommandBuilder:
-    def __init__(self, container_type: str) -> None:
+    def __init__(self, container_type: str, allowed_image_dir: Optional[str] = None) -> None:
         self.container_type = container_type
+        # container.allowed_image_dir; Singularity only
+        self._allowed_image_dir = allowed_image_dir if container_type == "singularity" else None
+        self._host_image = False
         self._job_id: str = ""
         self._resource_cpu: Maybe[int] = Nothing
         self._resource_mem: Maybe[float] = Nothing
@@ -65,10 +84,14 @@ class ContainerCommandBuilder:
     def with_image(self, image: str):
         # Also checked at task creation; repeated for tasks stored before. The image is not echoed: it may be a
         # host path.
-        if not is_valid_image(image):
+        if not is_valid_image(image, self._allowed_image_dir):
             raise ValueError("invalid image: must be a Docker reference or a docker://, library://, shub:// or oras:// "
                              "URI")
-        if self.container_type == "singularity":
+        self._host_image = is_allowed_host_image(image, self._allowed_image_dir)
+        if self._host_image:
+            # Checked and resolved on the Pulsar host, see host_image_check
+            self._image = Just(image)
+        elif self.container_type == "singularity":
             # Registry URIs are used as-is
             if has_registry_scheme(image):
                 self._image = Just(image)
@@ -215,6 +238,10 @@ class ContainerCommandBuilder:
 
         # Image
         image = self._image.maybe("", shlex.quote)
+        image_checks = []
+        if self._host_image:
+            image_checks.append(host_image_check(self._image.value, self._allowed_image_dir))
+            image = f'"${HOST_IMAGE_VAR}"'
 
         # Mounts
         mount_flags = []
@@ -243,7 +270,7 @@ class ContainerCommandBuilder:
         runtime = "docker run" if docker else "singularity exec --no-eval"
         container_cmd = " ".join(filter(None, [
             *env_prefix, runtime, cpu_flag, mem_flag, workdir_flag, *env_flags, *mount_flags, image, command_str]))
-        return " && ".join([*mkdir_cmds, container_cmd])
+        return " && ".join([*image_checks, *mkdir_cmds, container_cmd])
 
 
 # Unified command functions
@@ -303,9 +330,10 @@ def run_command(
     inputs_directory: str,
     container_type: str,
     job_directory: Optional[str] = None,
-    executor_index: int = 0
+    executor_index: int = 0,
+    allowed_image_dir: Optional[str] = None
 ) -> str:
-    builder = ContainerCommandBuilder(container_type) \
+    builder = ContainerCommandBuilder(container_type, allowed_image_dir) \
         .with_job_id(job_id) \
         .with_image(executor.image) \
         .with_command(
