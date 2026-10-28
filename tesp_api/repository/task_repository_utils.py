@@ -15,19 +15,17 @@ async def append_task_executor_logs(
         task_id: ObjectId,
         author: str,
         state: TesTaskState,
-        command_start_time: datetime,
         command_end_time: datetime,
-        stdout: str,
-        stderr: str,
-        exit_code: int
+        executor_logs: List[TesTaskExecutorLog],
+        system_logs: List[str] = ()
     ):
     task: RegisteredTesTask = await task_repository.get_task(maybe_of(author), {'_id': task_id, 'state': state}) \
         .map(lambda _task: get_else_throw(_task, TaskNotFoundError(task_id, Just(state))))
     logs: List[TesTaskLog] = task.logs.copy()
     logs[-1].end_time = command_end_time
-    logs[-1].logs.append(TesTaskExecutorLog(
-        start_time=command_start_time, end_time=command_end_time,
-        stdout=stdout, stderr=stderr, exit_code=exit_code))
+    logs[-1].logs.extend(executor_logs)
+    if system_logs:
+        logs[-1].system_logs = [*(logs[-1].system_logs or []), *system_logs]
     await task_repository.update_task(
         {'_id': task_id, 'state': state},
         {'$set': {'logs': jsonable_encoder(logs)}}
