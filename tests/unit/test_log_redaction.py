@@ -77,7 +77,7 @@ def test_redacts_get_url_and_post_fields():
     _assert_clean(redacted)
     assert "https://s3.example.org/my-bucket/work/in.txt?" in redacted
     assert "X-Amz-Expires=" in redacted  # parameters that are not secret stay
-    assert redacted.startswith("set -e && curl -fsSg -o /data/in.txt '")
+    assert redacted.startswith("( set -e && curl -fsSg -o /data/in.txt '")
 
 
 def test_redacts_url_encoded_command_line():
@@ -86,7 +86,7 @@ def test_redacts_url_encoded_command_line():
     assert "%3D" in str(url) and ACCESS_KEY in str(url)
     redacted = redact_presigned_urls(str(url))
     _assert_clean(redacted)
-    assert redacted.startswith("http://pulsar:8913/jobs/abc/submit?command_line=set+-e")
+    assert redacted.startswith("http://pulsar:8913/jobs/abc/submit?command_line=(+set+-e")
 
 
 TOKENS_AND_POLICIES = [
@@ -190,7 +190,7 @@ def test_wrapped_operation_errors_are_redacted(capsys):
         except ValueError as cause:
             PulsarRestOperations._reraise_custom(cause)
     except PulsarOperationsError as error:
-        assert "ValueError: unexpected answer for set -e" in str(error)  # the wrapped error is hidden from tracebacks
+        assert "ValueError: unexpected answer for ( set -e" in str(error)  # the wrapped error is hidden from tracebacks
         _assert_clean(str(error))
         logger.opt(exception=True).error(f"Pulsar operations error [msg: {error}]")
     _assert_clean(capsys.readouterr().out)
