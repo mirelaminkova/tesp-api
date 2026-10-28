@@ -1,13 +1,14 @@
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
 import botocore.session
 from aiobotocore.session import get_session
 from botocore import UNSIGNED
 from botocore.config import Config
+from loguru import logger
 
 from tesp_api.config.properties import properties
 from tesp_api.service.client.client import Client
@@ -16,6 +17,8 @@ from tesp_api.utils.types import S3Url
 
 ADDRESSING_STYLES = {'path', 'virtual', 'auto'}
 MAX_PRESIGN_EXPIRY_SECONDS = 7 * 24 * 3600  # SigV4 limit
+# Stands for the authenticated user in s3.allowed_output_prefixes (issue #33).
+USER_PLACEHOLDER = '{user}'
 
 # Query parameters of presigned URLs and form fields of presigned POSTs (lower case), e.g. `x-amz-signature=...`.
 # The POST policy is redacted too: it contains the x-amz-credential condition, i.e. the access key id.
@@ -43,6 +46,9 @@ class S3Config:
     addressing_style: str = 'path'
     presign_expiry_seconds: int = 3600
     output_presign_expiry_seconds: int = 24 * 3600
+    # `bucket/key-prefix` entries; when not empty, S3 outputs must lie under one of them. `{user}` stands for the
+    # authenticated user. Entries without `/` mean the whole bucket. Empty: any key the credentials can write.
+    allowed_output_prefixes: Tuple[str, ...] = ()
 
     def __post_init__(self):
         # Messages must never include the secret key.
@@ -58,6 +64,11 @@ class S3Config:
             raise ValueError(f's3.presign_expiry_seconds must be between 1 and {MAX_PRESIGN_EXPIRY_SECONDS}')
         if not 0 < self.output_presign_expiry_seconds <= MAX_PRESIGN_EXPIRY_SECONDS:
             raise ValueError(f's3.output_presign_expiry_seconds must be between 1 and {MAX_PRESIGN_EXPIRY_SECONDS}')
+        for entry in self.allowed_output_prefixes:
+            bucket = entry.split('/', 1)[0]
+            if not bucket or '{' in entry.replace(USER_PLACEHOLDER, '') or '}' in entry.replace(USER_PLACEHOLDER, ''):
+                raise ValueError('s3.allowed_output_prefixes entries must have the form bucket/key-prefix; '
+                                 f'{USER_PLACEHOLDER} is the only placeholder')
 
     @property
     def signed(self) -> bool:
@@ -72,6 +83,13 @@ def load_s3_config(props=None) -> S3Config:
         # Dynaconf parses environment values, e.g. a secret key "123456" would become an int.
         return None if value in (None, '') else str(value)
 
+    prefixes = s3.get('allowed_output_prefixes') or ()
+    if isinstance(prefixes, str):
+        # An environment variable may hold a comma-separated list instead of a TOML array.
+        prefixes = prefixes.split(',')
+    # A bare bucket name means the whole bucket; `tesp` must not match bucket `tesp-other`.
+    prefixes = tuple(entry if '/' in entry else f'{entry}/' for entry in (str(p).strip() for p in prefixes) if entry)
+
     return S3Config(
         endpoint_url=setting('endpoint_url'),
         region=setting('region') or 'us-east-1',
@@ -79,13 +97,60 @@ def load_s3_config(props=None) -> S3Config:
         secret_access_key=setting('secret_access_key'),
         addressing_style=setting('addressing_style') or 'path',
         presign_expiry_seconds=int(setting('presign_expiry_seconds') or 3600),
-        output_presign_expiry_seconds=int(setting('output_presign_expiry_seconds') or 24 * 3600))
+        output_presign_expiry_seconds=int(setting('output_presign_expiry_seconds') or 24 * 3600),
+        allowed_output_prefixes=prefixes)
 
 
 @lru_cache(maxsize=1)
 def get_s3_config() -> S3Config:
     """The server's S3 settings, read once."""
-    return load_s3_config()
+    config = load_s3_config()
+    if config.signed and not config.allowed_output_prefixes:
+        logger.warning('s3.allowed_output_prefixes is empty: any task may upload outputs to any key the S3 '
+                       'credentials can write, including other users\' outputs and inputs (issue #33)')
+    return config
+
+
+def _allowed_output_prefixes(config: S3Config, user: Optional[str]) -> List[str]:
+    """The allowed `bucket/key-prefix` strings for ``user``. Entries with `{user}` are skipped when there is no user
+    or it contains `/`, which could reach into another user's prefix."""
+    prefixes = []
+    for entry in config.allowed_output_prefixes:
+        if USER_PLACEHOLDER in entry:
+            if not user or '/' in user:
+                continue
+            entry = entry.replace(USER_PLACEHOLDER, user)
+        prefixes.append(entry)
+    return prefixes
+
+
+def is_allowed_output(s3_url: S3Url, io_type: Union[TesTaskIOType, str, None], user: Optional[str],
+                      config: Optional[S3Config] = None) -> bool:
+    """
+    Whether ``s3.allowed_output_prefixes`` lets ``user`` upload to ``s3_url``: always, when the list is empty. A FILE
+    output's key, or the key prefix a DIRECTORY output gets a presigned POST for, must start with an allowed prefix.
+    Keys with `.` or `..` segments are refused, as clients may normalise them away from the signed path.
+    """
+    config = config or get_s3_config()
+    if not config.allowed_output_prefixes:
+        return True
+    key = s3_url.key
+    if io_type == TesTaskIOType.DIRECTORY:
+        key = key.rstrip('/') + '/'
+    if any(segment in ('.', '..') for segment in key.split('/')):
+        return False
+    target = f'{s3_url.bucket}/{key}'
+    return any(target.startswith(prefix) for prefix in _allowed_output_prefixes(config, user))
+
+
+def find_disallowed_s3_outputs(outputs, user: Optional[str], config: Optional[S3Config] = None) -> List[str]:
+    """
+    Returns the fields (``outputs[0].url``) of S3 outputs outside ``s3.allowed_output_prefixes`` for ``user``. The
+    URLs are not returned, so the result can go into responses and logs.
+    """
+    return [f'outputs[{i}].url' for i, output in enumerate(outputs or [])
+            if isinstance(output.url, S3Url) and output.url.is_plain()
+            and not is_allowed_output(output.url, output.type, user, config)]
 
 
 def _client_args(config: S3Config) -> dict:
@@ -173,16 +238,24 @@ def presign_post_policy(s3_url: S3Url, config: Optional[S3Config] = None) -> dic
     return {'url': post['url'], 'fields': fields, 'key_prefix': key_prefix}
 
 
-def presign_s3_outputs(output_confs: List[dict], config: Optional[S3Config] = None) -> List[dict]:
+def presign_s3_outputs(output_confs: List[dict], config: Optional[S3Config] = None,
+                       user: Optional[str] = None) -> List[dict]:
     """
     Returns a copy of the stage-out ``output_confs`` in which S3 outputs are replaced by presigned uploads, marked with
     ``'presigned': True``: a FILE gets a presigned ``PUT`` URL (``'upload': 's3_put'``), a DIRECTORY a presigned POST
     policy for its key prefix (``'upload': 's3_post'`` with ``form_fields`` and ``key_prefix``).
+
+    Raises ``ValueError`` for an output outside ``s3.allowed_output_prefixes`` for ``user`` (the task's author). Tasks
+    are checked when created too; this catches tasks queued before the setting changed.
     """
     staged = []
     for conf in output_confs:
         url = conf.get('url')
         if isinstance(url, S3Url):
+            _require_plain(url)
+            config = config or get_s3_config()
+            if not is_allowed_output(url, conf.get('type'), user, config):
+                raise ValueError('S3 output outside s3.allowed_output_prefixes')
             if conf.get('type') == TesTaskIOType.DIRECTORY:
                 post = presign_post_policy(url, config)
                 conf = {**conf, 'url': post['url'], 'upload': 's3_post', 'form_fields': post['fields'],
