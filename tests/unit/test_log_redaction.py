@@ -97,13 +97,69 @@ TOKENS_AND_POLICIES = [
 ]
 
 
+# Not produced by any current code path (issue #48): JSON and dict reprs of POST fields, double URL encoding, SigV2.
+POST_FIELDS = {"x-amz-algorithm": "AWS4-HMAC-SHA256", "x-amz-credential": f"{ACCESS_KEY}/20261026/eu-west-1/s3/aws4_request",
+               "x-amz-date": "20261026T000000Z", "policy": "eyJleHBpcmF0aW9uIjoi+/a==",
+               "x-amz-signature": "0123456789abcdef"}
+OTHER_FORMS = [
+    json.dumps(POST_FIELDS),
+    json.dumps(POST_FIELDS, indent=2),
+    repr(POST_FIELDS),
+    repr({"form_fields": POST_FIELDS, "upload": "s3_post"}),
+    "policy: eyJleHBpcmF0aW9uIjoi+/a==",
+    # Double URL encoding, e.g. a command line URL-encoded into a query that is URL-encoded again.
+    str(URL("http://example.org/").with_query({"next": str(URL("http://pulsar:8913/jobs/abc/submit").with_query(
+        {"command_line": _command_line()}))})),
+    "%2527policy%253DeyJleHBpcmF0aW9uIjoi%252B/a%253D%253D%2527",
+    # A URL-encoded JSON body.
+    str(URL("http://example.org/").with_query({"fields": json.dumps(POST_FIELDS)})),
+    # SigV2 presigned URL and POST fields.
+    f"https://s3.example.org/my-bucket/in.txt?AWSAccessKeyId={ACCESS_KEY}&Signature=abc%2Bdef%3D&Expires=1761436800",
+    f"https://s3.example.org/my-bucket/in.txt?AWSAccessKeyId%3D{ACCESS_KEY}%26Signature%3Dabc%252Bdef%253D",
+    repr({"AWSAccessKeyId": ACCESS_KEY, "signature": "abc+def=", "policy": "eyJleHBpcmF0aW9uIjoi"}),
+]
+OTHER_FORM_IDS = ["json", "json-indented", "dict-repr", "nested-dict-repr", "yaml", "double-encoded-command-line",
+                  "double-encoded-policy", "encoded-json", "sigv2-url", "encoded-sigv2-url", "sigv2-dict-repr"]
+
+
 @pytest.mark.parametrize("text", TOKENS_AND_POLICIES)
 def test_redacts_session_tokens_and_policies(text):
     _assert_clean(redact_presigned_urls(text))
 
 
-def test_keeps_unrelated_text():
-    text = "restart_policy=always X-Amz-Date=20261026T000000Z key=work/results/"
+def _assert_no_secret_values(text: str):
+    _assert_clean(text)
+    for value in ("eyJleHBpcmF0aW9uIjoi", "0123456789abcdef", "abc+def", "abc%2Bdef", "abc%252Bdef"):
+        assert value not in text, value
+    for name in ("awsaccesskeyid", "signature", "policy"):
+        assert name not in text.lower(), name
+
+
+@pytest.mark.parametrize("text", OTHER_FORMS, ids=OTHER_FORM_IDS)
+def test_redacts_json_dict_double_encoded_and_sigv2_forms(text):
+    _assert_no_secret_values(redact_presigned_urls(text))
+
+
+def test_json_redaction_keeps_other_fields():
+    redacted = redact_presigned_urls(json.dumps(POST_FIELDS))
+    assert '"x-amz-algorithm": "AWS4-HMAC-SHA256"' in redacted
+    assert '"x-amz-date": "20261026T000000Z"' in redacted
+
+
+def test_double_encoded_redaction_keeps_other_parameters():
+    url = URL("http://example.org/").with_query({"next": str(URL("http://pulsar:8913/jobs/abc/submit").with_query(
+        {"command_line": _command_line()}))})
+    redacted = redact_presigned_urls(str(url))
+    assert "X-Amz-Expires%253D" in redacted
+    assert "s3.example.org/my-bucket/work/in.txt" in redacted
+
+
+@pytest.mark.parametrize("text", [
+    "restart_policy=always X-Amz-Date=20261026T000000Z key=work/results/",
+    '{"restart_policy": "always", "x-amz-date": "20261026T000000Z", "signature_version": "s3v4"}',
+    "PolicyArn=arn:aws:iam::aws:policy/ReadOnly policy_document signatures",
+])
+def test_keeps_unrelated_text(text):
     assert redact_presigned_urls(text) == text
 
 
@@ -208,18 +264,20 @@ def _scan(tmp_path, text: str) -> subprocess.CompletedProcess:
     _command_line(),
     str(URL("http://pulsar:8913/jobs/abc/submit").with_query({"command_line": _command_line()})),
     *TOKENS_AND_POLICIES,
-], ids=["raw", "url-encoded", "token", "encoded-token", "policy", "encoded-policy"])
+    *OTHER_FORMS,
+], ids=["raw", "url-encoded", "token", "encoded-token", "policy", "encoded-policy", *OTHER_FORM_IDS])
 def test_log_scan_fails_on_presigned_urls_without_printing_them(tmp_path, leak):
     result = _scan(tmp_path, f"tesp-api-1  | DEBUG {leak}\n")
     assert result.returncode == 1, result.stderr
-    assert "line 1" in result.stdout + result.stderr
+    # Indented JSON leaks on its later lines.
+    assert ("line 1" if "\n" not in leak else "line 3") in result.stdout + result.stderr
     _assert_clean(result.stdout + result.stderr)
 
 
 def test_log_scan_passes_redacted_logs(tmp_path):
     command = _command_line()
     url = URL("http://pulsar:8913/jobs/abc/submit").with_query({"command_line": command})
-    logged = [command, str(url), *TOKENS_AND_POLICIES]
+    logged = [command, str(url), *TOKENS_AND_POLICIES, *OTHER_FORMS]
     result = _scan(tmp_path, "".join(f"tesp-api-1  | {redact_presigned_urls(text)}\n" for text in logged))
     assert result.returncode == 0, result.stdout + result.stderr
 
