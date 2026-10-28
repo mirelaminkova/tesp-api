@@ -1,5 +1,5 @@
 import time
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import status, HTTPException
 from fastapi.responses import Response
@@ -9,7 +9,7 @@ from pymonad.maybe import Nothing, Maybe
 from fastapi.params import Query, Depends
 
 from tesp_api.config.properties import properties
-from tesp_api.repository.model.task import TesTaskView
+from tesp_api.repository.model.task import TesTaskView, TesTaskState
 from tesp_api.api.model.response_models import ErrorResponseModel
 from tesp_api.service.error import OAuth2TokenError, BasicAuthError
 from tesp_api.utils.token_validator import verify_token
@@ -37,6 +37,12 @@ query_descriptions = {
                    " 2048. Defaults to 256.",
     "page_token":  "OPTIONAL. Page token is used to retrieve the next page of results."
                    " If unspecified, returns the first page of results. See ListTasksResponse.next_page_token",
+    "state":       "OPTIONAL. Filter tasks by state. If unspecified, no task state filtering is done.",
+    "tag_key":     "OPTIONAL. Filter tasks by tags; may be repeated. A task matches if it has a tag with every given"
+                   " key, and the value paired with the key (by position in tag_value), if that value is given and"
+                   " not empty.",
+    "tag_value":   "OPTIONAL. Values for the tag_key filters, paired by position; may be repeated. A missing or"
+                   " empty value matches any value of its key. Must not be repeated more often than tag_key.",
     "view":        "OPTIONAL. Affects the fields included in the returned Task messages. See TaskView below."
                    " - MINIMAL: Task message will include ONLY the fields: Task.Id Task.State"
                    " - BASIC: Task message will include all fields EXCEPT: Task.ExecutorLog.stdout"
@@ -47,6 +53,9 @@ query_descriptions = {
 qry_var_name_prefix = Query(None, description=query_descriptions['name_prefix'])
 qry_var_page_size = Query(256, description=query_descriptions['page_size'])
 qry_var_page_token = Query(None, description=query_descriptions['page_token'])
+qry_var_state = Query(None, description=query_descriptions['state'])
+qry_var_tag_key = Query(None, description=query_descriptions['tag_key'])
+qry_var_tag_value = Query(None, description=query_descriptions['tag_value'])
 qry_var_view = Query(TesTaskView.MINIMAL, description=query_descriptions['view'])
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", auto_error=False)
@@ -60,11 +69,17 @@ async def view_query_params(view: Optional[TesTaskView] = qry_var_view):
 async def list_query_params(name_prefix: Optional[str] = qry_var_name_prefix,
                             page_size: int = qry_var_page_size,
                             page_token: Optional[str] = qry_var_page_token,
+                            state: Optional[TesTaskState] = qry_var_state,
+                            tag_key: Optional[List[str]] = qry_var_tag_key,
+                            tag_value: Optional[List[str]] = qry_var_tag_value,
                             view: dict = Depends(view_query_params)):
     return {
         "name_prefix": name_prefix,
         "page_size": page_size,
         "page_token": page_token,
+        "state": state,
+        "tag_key": tag_key or [],
+        "tag_value": tag_value or [],
         **view
     }
 

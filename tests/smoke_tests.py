@@ -307,6 +307,32 @@ def test_host_path_image_rejected(image):
     if image != "/":
         assert image not in resp.text
 
+# ListTasks filters by state and by tag_key/tag_value, paired by position (TES 1.1).
+def test_list_tasks_filters():
+    tag = f"smoke-{time.time_ns()}"
+    ids = {}
+    for value in ("bar", "qux"):
+        task = {"executors": [{"image": "alpine", "command": ["true"]}], "tags": {tag: value, "other": "1"}}
+        ids[value] = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    for id in ids.values():
+        _wait_for_state(id, "COMPLETE", 120)
+
+    def listed(query):
+        resp = _get_request(f"/v1/tasks?view=BASIC&{query}")
+        return sorted(task["id"] for task in resp["tasks"])
+
+    assert listed(f"tag_key={tag}&tag_value=bar") == [ids["bar"]]
+    assert listed(f"tag_key={tag}") == sorted(ids.values())
+    assert listed(f"tag_key={tag}&tag_value=&tag_key=other&tag_value=1") == sorted(ids.values())
+    assert listed(f"tag_key={tag}&tag_key=other&tag_value=qux&tag_value=1") == [ids["qux"]]
+    assert listed(f"tag_key={tag}&tag_value=nope") == []
+    assert listed(f"tag_key={tag}&state=COMPLETE&page_size=2048") == sorted(ids.values())
+    assert listed(f"tag_key={tag}&state=RUNNING") == []
+    assert all(task["state"] == "COMPLETE"
+               for task in _get_request("/v1/tasks?view=MINIMAL&state=COMPLETE")["tasks"])
+    resp = requests.get(f"{base_url}/v1/tasks?tag_key={tag}&tag_value=a&tag_value=b")
+    assert resp.status_code == 400
+
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
     response = _test_simple("cancel.json", 60, "RUNNING")
