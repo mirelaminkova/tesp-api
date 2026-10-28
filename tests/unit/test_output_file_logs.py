@@ -13,8 +13,7 @@ from pathlib import Path
 import pydantic
 import pytest
 
-from tesp_api.repository.model.task import TesTaskExecutor, TesTaskIOType, TesTaskLog
-from tesp_api.repository.task_repository_utils import _valid_output_file_logs
+from tesp_api.repository.model.task import TesTaskExecutor, TesTaskIOType, TesTaskLog, parse_output_file_logs
 from tesp_api.service.client.client_s3 import S3Config, presign_s3_outputs
 from tesp_api.utils.container import output_file_logs, stage_out_command, stage_out_script
 from tesp_api.utils.types import S3Url
@@ -165,8 +164,8 @@ def test_reported_logs_are_valid_task_logs():
              _conf("ftp://ftp.example.org/out.txt", "/data/out.txt")]
     stdout = f"{MARKER}\t0\t3\tsub dir/a #1.txt\n{MARKER}\t1\t5\t\n"
     _, logs = output_file_logs(stdout, MARKER, confs)
-    valid = _valid_output_file_logs("task-id", logs)
-    assert len(valid) == 2
+    valid, invalid = parse_output_file_logs(logs)
+    assert (len(valid), invalid) == (2, [])
     task_log = TesTaskLog(logs=[], outputs=valid)
     # Stored and read back as the task document is.
     assert TesTaskLog(**task_log.dict()).outputs[0].url == "s3://bucket/work/results/sub%20dir/a%20%231.txt"
@@ -175,4 +174,6 @@ def test_reported_logs_are_valid_task_logs():
 def test_invalid_output_file_logs_are_skipped():
     logs = [{"url": "not a url", "path": "/data/x", "size_bytes": "1"},
             {"url": UPLOAD_URL, "path": "/data/out.txt", "size_bytes": "1"}]
-    assert [log.path for log in _valid_output_file_logs("task-id", logs)] == [Path("/data/out.txt")]
+    valid, invalid = parse_output_file_logs(logs)
+    assert [log.path for log in valid] == [Path("/data/out.txt")]
+    assert invalid == logs[:1]

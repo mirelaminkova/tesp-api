@@ -2,10 +2,10 @@ import os
 import re
 from datetime import datetime
 from enum import Enum
-from typing import List, Dict, Union
+from typing import List, Dict, Tuple, Union
 from pathlib import Path
 from bson.objectid import ObjectId
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from pydantic.class_validators import root_validator
 
 from tesp_api.utils.types import AnyUrl, FtpUrl, S3Url, HttpUrl, HttpsUrl, LocalFileUrl
@@ -161,6 +161,20 @@ class TesTaskOutputFileLog(BaseModel):
     size_bytes: str = Field(..., example='1024',
                             description="Size of the file in bytes. Note, this is currently coded as a string because"
                                         " official JSON doesn't support int64 numbers.")
+
+
+def parse_output_file_logs(output_file_logs: List[dict]) -> Tuple[List[TesTaskOutputFileLog], List[dict]]:
+    """
+    The ``TesTaskOutputFileLog`` models of ``output_file_logs``, and the entries the model rejects: a stored log that
+    does not validate would make the task unreadable, so those are left out.
+    """
+    valid, invalid = [], []
+    for output_file_log in output_file_logs:
+        try:
+            valid.append(TesTaskOutputFileLog(**output_file_log))
+        except ValidationError:
+            invalid.append(output_file_log)
+    return valid, invalid
 
 
 class TesTaskLog(BaseModel):
