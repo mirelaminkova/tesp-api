@@ -307,6 +307,20 @@ def test_host_path_image_rejected(image):
     if image != "/":
         assert image not in resp.text
 
+# TES requires absolute input paths, volumes and workdirs, and NUL characters would be dropped by the shell reading
+# the job script; both are refused at task creation, naming the field.
+@pytest.mark.parametrize("task, field", [
+    ({"inputs": [{"path": "in.txt", "content": "x"}]}, "inputs[0].path"),
+    ({"volumes": ["vol"]}, "volumes[0]"),
+    ({"executors": [{"image": "alpine", "command": ["true"], "workdir": "data"}]}, "executors[0].workdir"),
+    ({"executors": [{"image": "alpine", "command": ["true"], "env": {"A": "a\x00b"}}]}, "executors[0].env"),
+])
+def test_relative_path_or_nul_rejected(task, field):
+    task = {"executors": [{"image": "alpine", "command": ["true"]}], **task}
+    resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
+    assert resp.status_code == 400
+    assert field in resp.text
+
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
     response = _test_simple("cancel.json", 60, "RUNNING")

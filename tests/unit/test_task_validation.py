@@ -1,6 +1,7 @@
 import pytest
 
-from tesp_api.repository.model.task import TesTask, find_invalid_container_fields
+from tesp_api.repository.model.task import TesTask, find_invalid_container_fields, find_relative_paths, \
+    find_nul_fields
 
 
 def _task(**overrides):
@@ -38,3 +39,54 @@ def test_mount_separator_in_output_file_name_is_allowed():
     # Outputs are mounted by their directory only
     task = _task(outputs=[{"path": "/data/sample:1,2.txt", "url": "http://example.org/upload", "type": "FILE"}])
     assert find_invalid_container_fields(task) == []
+
+
+def test_absolute_paths_are_accepted():
+    task = _task(executor={"workdir": "/data"}, inputs=[{"path": "/data/in", "content": "x"}], volumes=["/vol/A"])
+    assert find_relative_paths(task) == []
+
+
+@pytest.mark.parametrize("path", ["in.txt", "./in", "data/in", ""])
+def test_relative_input_path_names_the_field(path):
+    task = _task(inputs=[{"path": "/ok", "content": "x"}, {"path": path, "content": "x"}])
+    assert find_relative_paths(task) == ["inputs[1].path"]
+
+
+@pytest.mark.parametrize("path", ["vol", "./vol", "a/b"])
+def test_relative_volume_names_the_field(path):
+    assert find_relative_paths(_task(volumes=["/ok", path])) == ["volumes[1]"]
+
+
+@pytest.mark.parametrize("path", ["data", "./data", ""])
+def test_relative_workdir_names_the_field(path):
+    assert find_relative_paths(_task(executor={"workdir": path})) == ["executors[1].workdir"]
+
+
+def test_task_without_nul_has_no_nul_fields():
+    task = _task(executor={"env": {"A": "a b"}, "stdout": "/out"}, name="n", tags={"k": "v"},
+                 inputs=[{"path": "/in", "url": "http://example.org/in"}], volumes=["/vol"])
+    assert find_nul_fields(task) == []
+
+
+@pytest.mark.parametrize("overrides, field", [
+    ({"name": "a\x00b"}, "name"),
+    ({"description": "a\x00b"}, "description"),
+    ({"executor": {"image": "ubuntu\x00"}}, "executors[1].image"),
+    ({"executor": {"command": ["echo", "a\x00b"]}}, "executors[1].command[1]"),
+    ({"executor": {"env": {"A": "a\x00b"}}}, "executors[1].env"),
+    ({"executor": {"workdir": "/a\x00b"}}, "executors[1].workdir"),
+    ({"executor": {"stdout": "/a\x00b"}}, "executors[1].stdout"),
+    ({"inputs": [{"path": "/in\x00", "content": "x"}]}, "inputs[0].path"),
+    ({"outputs": [{"path": "/out\x00", "url": "http://example.org/upload", "type": "FILE"}]}, "outputs[0].path"),
+    ({"volumes": ["/vol\x00"]}, "volumes[0]"),
+    ({"tags": {"k": "a\x00b"}}, "tags"),
+    ({"tags": {"k\x00": "v"}}, "tags"),
+    ({"resources": {"zones": ["z\x00"]}}, "resources.zones[0]"),
+])
+def test_nul_names_the_field(overrides, field):
+    assert find_nul_fields(_task(**overrides)) == [field]
+
+
+def test_nul_in_input_content_is_allowed():
+    # Content is uploaded to Pulsar as a file, not passed through the job script
+    assert find_nul_fields(_task(inputs=[{"path": "/in", "content": "a\x00b"}])) == []

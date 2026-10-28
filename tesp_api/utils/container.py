@@ -1,3 +1,4 @@
+import hashlib
 import os
 import re
 import shlex
@@ -445,6 +446,15 @@ def stage_out_script(output_confs: List[dict]) -> str:
         commands.append(f"if [ -e {shlex.quote(path)} ]; then {upload}; else echo {skipped} >&2; fi")
     return " && ".join(commands)
 
+def volume_name(job_id: str, container_path: str) -> str:
+    """
+    Name of the Docker volume (for Singularity, the relative host directory) mounted at
+    ``container_path``. Built from a hash of the path, so different paths such as ``/a/b`` and ``/ab`` never share a
+    volume, and the name is valid for Docker whatever the path contains.
+    """
+    return f"vol-{job_id}-{hashlib.sha256(container_path.encode()).hexdigest()[:32]}"
+
+
 def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):
     output_confs: List[dict] = []
     volume_confs: List[dict] = []
@@ -453,11 +463,11 @@ def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):
     # Process outputs
     for output in outputs:
         output_dirname = os.path.dirname(output.path)
-        volume_name = f"vol-{job_id}-{output_dirname.replace('/', '')}"
+        output_volume = volume_name(job_id, output_dirname)
 
         if output_dirname not in existing_volume_paths:
             volume_confs.append({
-                'volume_name': volume_name,
+                'volume_name': output_volume,
                 'container_path': output_dirname
             })
             existing_volume_paths.append(output_dirname)
@@ -465,14 +475,14 @@ def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):
         output_confs.append({
             'container_path': output.path,
             'url': output.url,
-            'volume_name': volume_name,
+            'volume_name': output_volume,
             'type': output.type
         })
 
     for v in volumes:
         if str(v) not in existing_volume_paths:
             volume_confs.append({
-                'volume_name': f"vol-{job_id}-{str(v).replace('/', '')}",
+                'volume_name': volume_name(job_id, str(v)),
                 'container_path': str(v)
             })
 
