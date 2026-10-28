@@ -220,6 +220,19 @@ Canceling a task (`POST /v1/tasks/{id}:cancel`) is noticed at the next status re
 the Pulsar job, so it can take up to `max_poll_interval` seconds. Tasks with S3 outputs must also finish within
 `s3.output_presign_expiry_seconds`, see below.
 
+#### Restarts
+A Pulsar job goes on when `TESP API` stops or restarts (a redeploy, a crash), and so does its task. Each `TESP API`
+process (each gunicorn worker) holds a lease on the tasks it works on, renewed every 45 seconds and kept in the task
+document. Once a lease expires, at once after a clean shutdown and within 3 minutes after a crash, the first process to
+claim the task takes it over, so each task is taken over by one process only:
+
+* a `RUNNING` task whose job was submitted to Pulsar is waited for again and ends as usual, with its executor logs;
+* a task still `QUEUED` or `INITIALIZING`, or `RUNNING` but not yet submitted, ends in `SYSTEM_ERROR` with a system
+  log saying it was not run, and what Pulsar holds for it is erased. Submit it again;
+* a task canceled while no process waited for it gets its Pulsar job canceled.
+
+The Pulsar job id is the task id, so this needs the same Pulsar (and its job directories) after the restart.
+
 &nbsp;
 ### S3 inputs and outputs
 Inputs and outputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
@@ -417,7 +430,7 @@ longer configured to redirect stdout into the file.
 | _Pulsar_ | `TESP API` should be able to dispatch executions to multiple `Pulsar` services via different types of `Pulsar` interfaces. Currently, only one `Pulsar` service is supported       |
 | _Pulsar_ | `Pulsar` must be "polled" for job state. Preferably `Pulsar` should notify `TESP API` about state change. This is already default behavior when using `Pulsar` with message queues |
 | _TES_    | Canceling a `TES` task calls Pulsar's cancel endpoint at the next status request (see [Waiting for Pulsar jobs](#waiting-for-pulsar-jobs)) but container termination depends on Pulsar/runtime behavior. In-flight tasks may still complete. |
-| _TES_    | Waiting for Pulsar jobs happens in the `TESP API` process and is not resumed when it starts again. Tasks that are queued, initializing or running when it stops or restarts never get their logs or final state: currently, after a clean shutdown they show `CANCELED` (the shutdown handler fails before it cancels their Pulsar jobs), after a crash they keep their state, and in both cases their Pulsar jobs go on. |
+| _TES_    | Tasks that are `QUEUED` or `INITIALIZING` when `TESP API` stops, or `RUNNING` but not yet submitted to Pulsar, end in `SYSTEM_ERROR` (see [Restarts](#restarts)); they are not resubmitted. Waiting for submitted jobs is resumed. |
 | _TES_    | Only `cpu_cores` and `ram_gb` are used, as container runtime flags and/or a batch-system native specification (see [Task resources](#task-resources-cpu-and-memory)); with the default settings they are not enforced for `singularity`. Other resource fields (disk, preemptible, zones) are stored but not enforced. |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
