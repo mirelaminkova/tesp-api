@@ -501,3 +501,24 @@ def test_job_script_not_in_task_logs():
         assert leaked not in stdout, leaked
         assert leaked not in stderr, leaked
     _assert_no_s3_secrets_stored(task_id)
+
+# A restart of tesp-api does not cancel or lose running tasks (issue #52): waiting for the Pulsar job is resumed and the
+# task ends COMPLETE with its executor logs.
+def test_running_task_survives_tesp_api_restart():
+    token = f"restart-{time.time_ns()}"
+    task = {"executors": [{"image": "ubuntu", "command": ["sh", "-c", f"sleep 45 && echo {token}"]}]}
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "RUNNING", 120)
+    time.sleep(10)  # submitted to Pulsar
+
+    subprocess.run(["docker", "restart", "tesp-api"], check=True)
+    for _ in range(120):
+        try:
+            if requests.get(f"{base_url}/v1/service-info", timeout=5).status_code == 200:
+                break
+        except requests.ConnectionError:
+            pass
+        time.sleep(1)
+
+    assert _wait_for_state(task_id, "COMPLETE", 300)
+    assert token in _executor_logs(task_id, "stdout")
