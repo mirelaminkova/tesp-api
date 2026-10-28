@@ -240,7 +240,7 @@ async def handle_run_task(event: Event) -> None:
         # Stage-out command
         stage_out_cmd = ""
         if output_confs:
-            stage_out_confs = presign_s3_outputs(output_confs)
+            stage_out_confs = presign_s3_outputs(output_confs, user=author)
             stage_out_cmd = stage_out_command(
                 stage_exec, resource_conf, stage_out_confs, volume_confs,
                 container_type=CONTAINER_TYPE,

@@ -41,6 +41,9 @@ s3.secret_access_key = ""
 s3.addressing_style = "path"      # "path", "virtual" or "auto"
 s3.presign_expiry_seconds = 3600  # lifetime of the download URLs handed to Pulsar
 s3.output_presign_expiry_seconds = 86400  # lifetime of the upload URLs; must cover the whole run of a task
+# bucket/key-prefix entries S3 outputs must start with, e.g. ["tesp-results/users/{user}/"]; {user} is the
+# authenticated user. Empty: any key the S3 credentials can write (see README).
+s3.allowed_output_prefixes = []
 
 [dev-docker]
 db.mongodb_uri = "mongodb://tesp-db:27017"
