@@ -18,7 +18,6 @@ from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.service.event_handler import Event, local_handler
 from tesp_api.repository.task_repository import task_repository
-from tesp_api.service.file_transfer_service import file_transfer_service
 from tesp_api.service.client.client_s3 import presign_s3_inputs, presign_s3_outputs, redact_presigned_urls
 from tesp_api.service.error import pulsar_event_handle_error, pulsar_cancel_task_promise, TaskNotFoundError, \
     TaskExecutorError
