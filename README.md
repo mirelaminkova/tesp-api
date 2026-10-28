@@ -293,6 +293,13 @@ with `--env`, which splits values on `,` and trims quotes, and `singularity exec
 not shell-evaluated inside the container either. This needs Apptainer 1.0+ or SingularityCE 3.10+. Apptainer treats
 the names `PATH`, `PREPEND_PATH` and `APPEND_PATH` specially and does not let tasks override `HOME` or `LD_LIBRARY_PATH`.
 
+Docker gives each executor a writable container layer. With Singularity, executors run with `--writable-tmpfs`, so they
+can also write anywhere in the container, e.g. new files next to their inputs or a `/scratch` directory. As with
+Docker, such writes are lost when the executor ends: share files between executors through `volumes` or the
+directories of `outputs`. The overlay is a tmpfs limited by `sessiondir max size` in `apptainer.conf` (64 MiB by
+default); larger scratch data should go to `/tmp`, a volume or an output directory, or the limit must be raised on the
+batch nodes.
+
 &nbsp;
 ### Configuring required services
 You can have a look at [./docker-compose.yaml](https://github.com/CESNET/tesp-api/blob/main/docker-compose.yaml) to see how
