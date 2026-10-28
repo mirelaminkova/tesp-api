@@ -11,6 +11,7 @@ from fastapi.responses import Response, JSONResponse
 from tesp_api.api.error import api_handle_error, get_error_response_model, get_response_for_error_model
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.repository.task_repository import task_repository
+from tesp_api.repository.task_query import list_tasks_query
 from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog, \
     find_unsupported_s3_urls, find_unsupported_outputs, find_invalid_container_fields
 from tesp_api.utils.functional import maybe_of, identity_with_side_effect
@@ -113,11 +114,16 @@ async def get_tasks(
         token_subject: str = Depends(parse_verify_token),
         query_params: dict = Depends(list_query_params)
         ) -> Response:
+    if len(query_params['tag_value']) > len(query_params['tag_key']):
+        return get_response_for_error_model(get_error_response_model(
+            HTTPStatus.BAD_REQUEST, message="Each tag_value must be paired with a tag_key."))
+    search_query = list_tasks_query(query_params['name_prefix'], query_params['state'],
+                                    query_params['tag_key'], query_params['tag_value'])
     return await Promise(lambda resolve, reject: resolve((
             maybe_of(token_subject),
             maybe_of(query_params['page_size']),
             maybe_of(query_params['page_token']).map(lambda _p_token: ObjectId(_p_token)),
-            maybe_of(query_params['name_prefix']).map(lambda _name_prefix: {'name': {'$regex': f"^{_name_prefix}"}}))))\
+            maybe_of(search_query or None))))\
         .then(lambda get_tasks_args: task_repository.get_tasks(*get_tasks_args))\
         .map(lambda tasks_and_token: response_from_model(
             TesGetAllTasksResponseModel(
