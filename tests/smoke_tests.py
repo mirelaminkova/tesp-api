@@ -164,6 +164,17 @@ def test_one_log_per_executor():
     assert [(log["stdout"], log["stderr"], log["exit_code"]) for log in task_log["logs"]] == \
            [("", "", 0), ("step1\nstep2\n", "warn\n", 4)]
 
+# Issue #23: with ignore_error, a failing executor is logged and the next one still runs.
+def test_ignore_error_continues():
+    task = {"executors": [
+        {"image": "ubuntu", "command": ["sh", "-c", "exit 3"], "ignore_error": True},
+        {"image": "ubuntu", "command": ["echo", "hello"]},
+    ]}
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
+    [task_log] = _get_request(f"/v1/tasks/{task_id}?view=FULL")["logs"]
+    assert [(log["stdout"], log["exit_code"]) for log in task_log["logs"]] == [("", 3), ("hello\n", 0)]
+
 # Issue #64: a failing last stage (here the only executor, no outputs) keeps its exit code.
 def test_failing_last_executor_keeps_exit_code():
     task = {"executors": [{"image": "ubuntu", "command": ["sh", "-c", "echo before-fail; exit 3"]}]}
