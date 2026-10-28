@@ -307,6 +307,25 @@ def test_host_path_image_rejected(image):
     if image != "/":
         assert image not in resp.text
 
+# TES 1.1 resources.backend_parameters: none are supported, so strict tasks that set any are refused; otherwise they
+# are stored, returned in the FULL view and ignored.
+def test_backend_parameters_strict_rejected():
+    task = {"executors": [{"image": "alpine", "command": ["true"]}],
+            "resources": {"backend_parameters": {"INVALID": "PARAMETER"}, "backend_parameters_strict": True}}
+    resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
+    assert resp.status_code == 400
+    assert "backend_parameters" in resp.text
+
+def test_backend_parameters_stored():
+    task = {"executors": [{"image": "alpine", "command": ["true"]}],
+            "resources": {"backend_parameters": {"INVALID": "PARAMETER"}}}
+    id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    resources = _get_request(f"/v1/tasks/{id}?view=FULL")["resources"]
+    assert resources["backend_parameters"] == {"INVALID": "PARAMETER"}
+    assert resources["backend_parameters_strict"] is False
+    assert _get_request("/v1/service-info")["tesResources_backend_parameters"] == []
+    _wait_for_state(id, "COMPLETE", 120)
+
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
     response = _test_simple("cancel.json", 60, "RUNNING")

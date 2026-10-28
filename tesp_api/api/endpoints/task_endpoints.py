@@ -12,7 +12,8 @@ from tesp_api.api.error import api_handle_error, get_error_response_model, get_r
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog, \
-    find_unsupported_s3_urls, find_unsupported_outputs, find_invalid_container_fields
+    find_unsupported_s3_urls, find_unsupported_outputs, find_invalid_container_fields, \
+    find_unsupported_backend_parameters, SUPPORTED_BACKEND_PARAMETERS
 from tesp_api.utils.functional import maybe_of, identity_with_side_effect
 from tesp_api.api.model.task_service_info import TesServiceInfo, TesServiceType, TesServiceOrganization
 from tesp_api.api.model.response_models import \
@@ -65,6 +66,13 @@ async def create_task(
                     f"match [A-Za-z_][A-Za-z0-9_]*; images must be Docker references or docker://, library://, "
                     f"shub:// or oras:// URIs (not host paths, and not starting with '-'); input paths, volumes and "
                     f"the directories of output paths must not contain ':' or ','."))
+    unsupported_backend_parameters = find_unsupported_backend_parameters(tes_task)
+    if unsupported_backend_parameters:
+        return get_response_for_error_model(get_error_response_model(
+            HTTPStatus.BAD_REQUEST,
+            message=f"Unsupported resources.backend_parameters with backend_parameters_strict: "
+                    f"{', '.join(unsupported_backend_parameters)}. Supported: "
+                    f"{', '.join(SUPPORTED_BACKEND_PARAMETERS) or 'none'}."))
     task_to_create = RegisteredTesTask(
         **tes_task.dict(),
         state=TesTaskState.QUEUED,
@@ -168,5 +176,6 @@ async def get_service_info() -> TesServiceInfo: # FastAPI directly handles Pydan
         updatedAt="2021-10-26T00:00:00Z",
         environment="dev",
         version=Commons.get_service_version(),
-        storage=["https://www.fi.muni.cz/"]
+        storage=["https://www.fi.muni.cz/"],
+        tesResources_backend_parameters=SUPPORTED_BACKEND_PARAMETERS
     )
