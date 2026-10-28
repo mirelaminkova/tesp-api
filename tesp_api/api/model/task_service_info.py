@@ -38,7 +38,8 @@ class TesServiceInfo(BaseModel):
                                                                                    'information about the service.')
 
     organization: TesServiceOrganization = Field(..., description='Organization providing the service')
-    contactUrl: HttpUrl = Field(None, example='mailto:support@example.com',
+    # str: a mailto: URL (RFC 2368) is allowed, and pydantic's URL types refuse it.
+    contactUrl: str = Field(None, example='mailto:support@example.com',
                                 description='URL of the contact for the provider of this'
                                             'service, e.g. a link to a contact form (RFC 3986 format), or an email ('
                                             'RFC 2368 format).')
@@ -66,7 +67,8 @@ class TesServiceInfo(BaseModel):
                                      'recommended, but other identifiers, such as dates or commit hashes, are also '
                                      'allowed. The version should be changed whenever the service is updated.')
 
-    storage: List[HttpUrl] = Field(None,
+    # str: s3:// and file:// locations, as in the example, are not HTTP URLs.
+    storage: List[str] = Field(None,
                                    example=['file:///path/to/local/funnel-storage', 's3://ohsu-compbio-funnel/storage'],
                                    description='Lists some, but not necessarily all, storage locations supported by '
                                                'the service.')

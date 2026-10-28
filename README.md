@@ -157,6 +157,16 @@ To apply different environment (i.e. to switch which section will be picked by `
 in the [./docker/tesp_api/Dockerfile](https://github.com/CESNET/tesp-api/blob/main/docker/tesp_api/Dockerfile))  
 
 &nbsp;
+### Service info
+`GET /v1/service-info` describes the deployment from the `service_info.*` settings (see
+[./settings.toml](settings.toml)), e.g. `TESP_API_SERVICE_INFO__ORGANIZATION__NAME` in the environment. Set `id`,
+`name`, `organization.name`/`organization.url`, `contact_url`, `documentation_url` and `environment` per deployment:
+unset, `id`, `name`, `description` and `organization` describe the tesp-api project and the others are left out.
+`version` is the latest release in [CHANGELOG.md](CHANGELOG.md) unless `service_info.version` is set (e.g. to the
+deployed commit). `storage` is `service_info.storage`, or `s3.endpoint_url` when that is set. The answer is built once
+at startup, and invalid values (e.g. an organization URL that is not one) stop `TESP API` from starting.
+
+&nbsp;
 ### Authentication
 `TESP API` can run without authentication (default). To enable Basic Auth, set `basic_auth.enable = true`
 and configure `basic_auth.username` and `basic_auth.password` in `settings.toml`. To enable OAuth2,
