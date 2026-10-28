@@ -139,6 +139,19 @@ def test_submit_task_complete():
 def test_submit_task_fail():
     assert _test_activity("state_false.json", 10, 60, 'EXECUTOR_ERROR')
 
+# Issue #66: a failing stage-in is a system error, with the reason in the system logs and no executor log.
+def test_missing_input_is_system_error():
+    task = {
+        "inputs": [{"path": "/data/missing", "url": "http://172.17.0.1:5000/test_data/does-not-exist.txt",
+                    "type": "FILE"}],
+        "executors": [{"image": "ubuntu", "command": ["cat", "/data/missing"]}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "SYSTEM_ERROR", 120)
+    [task_log] = _get_request(f"/v1/tasks/{task_id}?view=FULL")["logs"]
+    assert task_log["logs"] == []
+    assert any("stage-in failed (exit code 22)" in log for log in task_log["system_logs"])
+
 # Issue #64: a failing last stage (here the only executor, no outputs) keeps its exit code.
 def test_failing_last_executor_keeps_exit_code():
     task = {"executors": [{"image": "ubuntu", "command": ["sh", "-c", "echo before-fail; exit 3"]}]}
