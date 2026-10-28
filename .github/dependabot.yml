@@ -1,0 +1,20 @@
+# Keeps the digest-pinned Docker base images (#9) and the workflow actions current (issue #11).
+version: 2
+updates:
+  - package-ecosystem: docker
+    directories:
+      - /docker/tesp_api
+      - /docker/pulsar_rest
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
