@@ -296,6 +296,17 @@ def test_invalid_env_name_rejected():
     assert resp.status_code == 400
     assert "executors[0].env" in resp.text
 
+# Images that are host paths (run by Singularity as the container root) are refused at task creation, naming the
+# field without echoing the value.
+@pytest.mark.parametrize("image", ["/", "/images/x.sif", "./rel", "instance://x"])
+def test_host_path_image_rejected(image):
+    task = {"executors": [{"image": image, "command": ["true"]}]}
+    resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
+    assert resp.status_code == 400
+    assert "executors[0].image" in resp.text
+    if image != "/":
+        assert image not in resp.text
+
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
     response = _test_simple("cancel.json", 60, "RUNNING")
@@ -303,6 +314,27 @@ def test_task_cancel():
     assert task_id
     _post_request(f"/v1/tasks/{task_id}:cancel")
     assert _wait_for_state(task_id, "CANCELED", 60)
+    # Polling notices the cancellation and cancels the Pulsar job too (issue #49); the old loop never did.
+    assert _wait_for_pulsar_cancel(task_id, 60)
+
+def _wait_for_pulsar_cancel(task_id, timeout):
+    """Whether tesp-api asked Pulsar to cancel the task's job.
+
+    Reads the DEBUG log line of each Pulsar request (log_pulsar_request), so it needs the compose container name
+    tesp-api, logging.level = "DEBUG" and Pulsar's REST interface (over AMQP, cancel is a queue message).
+    """
+    for _ in range(timeout):
+        logs = subprocess.run(["docker", "logs", "tesp-api"], capture_output=True, text=True)
+        if f"/jobs/{task_id}/cancel>" in logs.stdout + logs.stderr:
+            return True
+        time.sleep(1)
+    return False
+
+# Runs longer than the legacy poll limit of the compose test profile (pulsar.status.max_polls = 5 at a 1 s interval),
+# which used to fail the task while its job kept running (issue #49).
+def test_task_outlives_legacy_poll_limit():
+    response = _test_simple("long_running.json", 120)
+    assert "finished" in _executor_logs(_gnv(response, "id"), "stdout")
 
 # Checks whether given task exceeds available resources.
 def test_resource_check_with_limits():
@@ -318,6 +350,11 @@ def test_resource_check_with_limits():
     assert ram_gb <= max_ram_gb, f"RAM exceeds the limit: {ram_gb} > {max_ram_gb}"
 
     print(f"Requested resources: CPU cores = {cpu_cores}, RAM = {ram_gb} GB (Limits: {max_cpu_cores} cores, {max_ram_gb} GB RAM)")
+
+# A task with resources.cpu_cores and ram_gb (sent by every Nextflow task) completes with the default
+# container.resource_limits, also under singularity where apptainer cannot apply the limits (issue #38).
+def test_task_with_resources_completes():
+    assert _test_simple("resources.json", 120)
 
 # Remove uploaded_data directory
 @pytest.fixture(scope="session", autouse=True)
@@ -377,7 +414,8 @@ def _assert_no_s3_secrets_stored(task_id):
     stored = json.dumps(_get_request(f"/v1/tasks/{task_id}?view=FULL"))
     for leaked in (S3_TEST_SECRET_KEY, "X-Amz-Signature", "X-Amz-Credential", "x-amz-signature",
                    "x-amz-credential"):
-        assert leaked not in stored
+        # A plain `assert leaked not in stored` would print the stored task, secrets included, into the public CI log.
+        assert leaked not in stored, f"{leaked!r} stored with task {task_id}"
 
 # Downloads a plain s3://bucket/key input using the server-side S3 settings.
 def test_s3_input():
@@ -440,4 +478,26 @@ def test_s3_outputs():
         f"{prefix}/results/sub dir/nested.txt": f"nested-{token}\n",
     }
     _assert_skipped(task_id, ["/data/s3_out/missing.txt", "/data/s3_out/missing_dir"])
+    _assert_no_s3_secrets_stored(task_id)
+
+# The job script is not traced (issue #18): executor env values, presigned S3 URLs and the host container commands
+# must not show up in the task's stored stdout/stderr logs.
+def test_job_script_not_in_task_logs():
+    _s3_put_test_object("smoke/trace/input.txt", b"in")  # staged in only so the job holds a presigned GET URL
+    token = f"trace-{time.time_ns()}"
+    task = {
+        "inputs": [{"path": "/data/trace/in.txt", "url": f"s3://{S3_TEST_BUCKET}/smoke/trace/input.txt", "type": "FILE"}],
+        "outputs": [{"path": "/data/trace/out.txt", "url": f"s3://{S3_TEST_BUCKET}/smoke/trace/{token}.txt",
+                     "type": "FILE"}],
+        "executors": [{"image": "ubuntu", "command": ["sh", "-c", "echo hi && echo hi > /data/trace/out.txt"],
+                       "env": {"SECRET": "s3cr3t"}}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
+
+    stdout, stderr = _executor_logs(task_id, "stdout"), _executor_logs(task_id, "stderr")
+    assert "hi" in stdout
+    for leaked in ("s3cr3t", "X-Amz-Signature", "singularity exec", "docker run"):
+        assert leaked not in stdout, leaked
+        assert leaked not in stderr, leaked
     _assert_no_s3_secrets_stored(task_id)

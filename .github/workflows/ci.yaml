@@ -123,11 +123,25 @@ jobs:
         if: always()
         run: df -h / /opt/pysetup/files/staging || true
 
-      - name: dump logs on failure
-        if: failure() || cancelled()
+      - name: scan logs for presigned URLs
+        # Runs on success too, so a leak fails the job; the fork's logs are public (issue #39).
+        id: scan
+        if: always()
         run: |
-          docker compose --profile pulsar ps -a
-          docker compose --profile pulsar logs --no-color
+          docker compose --profile pulsar logs --no-color > "$RUNNER_TEMP/compose.log" 2>&1 || true
+          logs=("$RUNNER_TEMP/compose.log")
+          if [ -f upload_server.log ]; then logs+=(upload_server.log); fi
+          bash ci/scan-logs.sh "${logs[@]}"
+
+      - name: show containers on failure
+        if: failure() || cancelled()
+        run: docker compose --profile pulsar ps -a
+
+      - name: dump logs on failure
+        # Only logs the scan passed are printed.
+        if: (failure() || cancelled()) && steps.scan.outcome == 'success'
+        run: |
+          cat "$RUNNER_TEMP/compose.log"
           cat upload_server.log || true
 
   # GA4GH TES conformance audit (issue #2). Known failures are tracked as
@@ -190,8 +204,25 @@ jobs:
           RUN_TIMEOUT: "1500"
         run: bash tests/conformance.sh
 
-      - name: publish summary
+      - name: collect compose logs
         if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/conformance/report"
+          docker compose --profile pulsar logs --no-color > "$RUNNER_TEMP/conformance/report/compose.log" 2>&1 || true
+
+      - name: scan logs for presigned URLs
+        # The report is published only if it holds no presigned URLs or S3 credentials (issue #39). The job-level
+        # continue-on-error keeps a leak here from failing the run; the integration job's scan does that.
+        id: scan
+        if: always()
+        run: |
+          if ! bash ci/scan-logs.sh "$RUNNER_TEMP/conformance/report"; then
+            echo "::error title=Log scan::The conformance report or compose logs hold presigned URLs or S3 credentials; not publishing or uploading them."
+            exit 1
+          fi
+
+      - name: publish summary
+        if: always() && steps.scan.outcome == 'success'
         run: cat "$RUNNER_TEMP"/conformance/report/*/summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
 
       - name: flag failures
@@ -203,14 +234,8 @@ jobs:
             echo "::error title=TES conformance::The conformance run broke before finishing; see the step log and run.log in the conformance-report artefact."
           fi
 
-      - name: collect compose logs
-        if: always()
-        run: |
-          mkdir -p "$RUNNER_TEMP/conformance/report"
-          docker compose --profile pulsar logs --no-color > "$RUNNER_TEMP/conformance/report/compose.log" 2>&1 || true
-
       - name: upload report
-        if: always()
+        if: always() && steps.scan.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: conformance-report

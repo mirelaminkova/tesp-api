@@ -10,15 +10,19 @@ from pymonad.maybe import Just, Nothing
 from bson.objectid import ObjectId
 from pymonad.promise import Promise, _Promise
 
-from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes, untraced
+from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes
+from tesp_api.utils.job_script import job_script
 from tesp_api.service.pulsar_service import pulsar_service
+from tesp_api.service.resources import get_resource_config
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.service.event_handler import Event, local_handler
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.service.file_transfer_service import file_transfer_service
 from tesp_api.service.client.client_s3 import presign_s3_inputs, presign_s3_outputs, redact_presigned_urls
-from tesp_api.service.error import pulsar_event_handle_error, TaskNotFoundError, TaskExecutorError
+from tesp_api.service.error import pulsar_event_handle_error, pulsar_cancel_task_promise, TaskNotFoundError, \
+    TaskExecutorError
+from tesp_api.service.job_polling import TaskCanceledError
 from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType, job_streams
 from tesp_api.repository.model.task import (
     TesTaskState,
@@ -205,6 +209,12 @@ async def handle_run_task(event: Event) -> None:
             start_time=Just(datetime.datetime.now(datetime.timezone.utc))
         )
 
+        # TES resources go to the batch system (native specification) and, per container.resource_limits, onto the
+        # container command lines.
+        resource_config = get_resource_config()
+        submit_params = resource_config.submit_params(resource_conf)
+        resource_conf = resource_config.container_resource_conf(resource_conf, CONTAINER_TYPE)
+
         stage_exec = TesTaskExecutor(image="willdockerhub/curl-wget:latest", command=[], workdir=Path("/downloads"))
 
         # Stage-in command
@@ -214,9 +224,6 @@ async def handle_run_task(event: Event) -> None:
             stage_in_mount = payload['task_config']['inputs_directory']
             stage_in_confs = presign_s3_inputs(input_confs)
             stage_in_cmd = stage_in_command(stage_exec, resource_conf, stage_in_mount, stage_in_confs, CONTAINER_TYPE)
-            if any(conf.get('presigned') for conf in stage_in_confs):
-                # Presigned URLs must not show up in the `set -x` trace, which is stored as the task's stderr log.
-                stage_in_cmd = untraced(stage_in_cmd)
 
         # Main execution commands
         container_cmds = []
@@ -240,15 +247,9 @@ async def handle_run_task(event: Event) -> None:
                 bind_mount=payload['task_config'].get('inputs_directory') if CONTAINER_TYPE == "singularity" else None,
                 job_directory=payload['task_config'].get('job_directory') if CONTAINER_TYPE == "singularity" else None
             )
-            if any(conf.get('presigned') for conf in stage_out_confs):
-                # As for stage-in: presigned URLs and POST signatures must stay out of the stored `set -x` trace.
-                stage_out_cmd = untraced(stage_out_cmd)
 
-        # Combine all commands into a single string for Pulsar
-        executors_commands_joined_str = " && ".join(filter(None, container_cmds))
-        parts = ["set -xe", stage_in_cmd, executors_commands_joined_str, stage_out_cmd]
-        non_empty_parts = [p.strip() for p in parts if p and p.strip()]
-        run_command_str = " && ".join(non_empty_parts) if non_empty_parts else None
+        # Single job script for Pulsar (untraced, see job_script)
+        run_command_str = job_script(stage_in_cmd, *container_cmds, stage_out_cmd)
 
         command_start_time = datetime.datetime.now(datetime.timezone.utc)
         command_status: dict
@@ -258,8 +259,14 @@ async def handle_run_task(event: Event) -> None:
             command_status = {'stdout': '', 'stderr': 'No commands to run.', 'returncode': 0}
         else:
             logger.debug(f"Submitting job to Pulsar for task {task_id}: {redact_presigned_urls(run_command_str)}")
-            await pulsar_operations.run_job(task_id, run_command_str)
-            command_status = await pulsar_operations.job_status_complete(str(task_id))
+            await pulsar_operations.run_job(task_id, run_command_str, submit_params)
+
+            # POST /tasks/{id}:cancel only marks the task; polling notices it and ends the Pulsar job below.
+            async def is_canceled() -> bool:
+                task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
+                return task_monad.is_just() and task_monad.value.state == TesTaskState.CANCELED
+
+            command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled)
 
         command_end_time = datetime.datetime.now(datetime.timezone.utc)
         await append_task_executor_logs(
@@ -274,6 +281,7 @@ async def handle_run_task(event: Event) -> None:
 
         if current_task_obj.state == TesTaskState.CANCELED:
             logger.warning(f"Task {task_id} found CANCELED after job completion polling. Aborting state changes.")
+            await pulsar_cancel_task_promise(str(task_id), pulsar_operations)  # erase the finished job's files
             return
 
         if command_status.get('returncode', -1) != 0:
@@ -295,6 +303,10 @@ async def handle_run_task(event: Event) -> None:
             .catch(lambda error: pulsar_event_handle_error(error, task_id, event_name, pulsar_operations)) \
             .then(lambda x: x)
 
+    except TaskCanceledError:
+        logger.info(f"Task {task_id} was canceled while its Pulsar job ran. Stopped polling, canceling the job.")
+        await pulsar_cancel_task_promise(str(task_id), pulsar_operations)
+
     except asyncio.CancelledError:
         logger.warning(f"handle_run_task for task {task_id} was explicitly cancelled (asyncio.CancelledError).")
         await task_repository.update_task_state(task_id, None, TesTaskState.CANCELED)
@@ -303,7 +315,8 @@ async def handle_run_task(event: Event) -> None:
         logger.info(f"Task {task_id} Pulsar job cleanup attempted after asyncio cancellation.")
 
     except Exception as error:
-        logger.error(f"Exception in handle_run_task for task {task_id}: {type(error).__name__} - {error}")
+        logger.error(f"Exception in handle_run_task for task {task_id}: {type(error).__name__} - "
+                     f"{redact_presigned_urls(str(error))}")
 
         task_state_after_error_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
         if task_state_after_error_monad.is_just() and task_state_after_error_monad.value.state == TesTaskState.CANCELED:

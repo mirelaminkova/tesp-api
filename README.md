@@ -167,6 +167,60 @@ Container execution runtime is controlled by the `CONTAINER_TYPE` environment va
 `singularity`). The default is `docker`.
 
 &nbsp;
+### Task resources (CPU and memory)
+TES `resources.cpu_cores` and `resources.ram_gb` can be enforced in two places, both optional (TES lets a
+backend treat resources as a request it may not honour).
+
+| Setting | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `container.resource_limits` | `TESP_API_CONTAINER__RESOURCE_LIMITS` | `auto` | Pass `--cpus`/`--memory` to the container runtime: `auto` for `docker` only, `always` for `docker` and `singularity`, `never` for neither |
+| `pulsar.native_specification.cpu_cores` | `TESP_API_PULSAR__NATIVE_SPECIFICATION__CPU_CORES` | empty | Native specification template used when a task requests CPUs, e.g. `--cpus-per-task={cpu_cores}` for SLURM |
+| `pulsar.native_specification.ram_gb` | `TESP_API_PULSAR__NATIVE_SPECIFICATION__RAM_GB` | empty | Native specification template used when a task requests memory, e.g. `--mem={ram_mib}` for SLURM |
+
+**Container flags.** `--memory` gets `ram_gb` in whole MiB, rounded up (e.g. `--memory=1536m` for 1.5 GB). Docker
+applies both flags itself. Apptainer needs cgroups v2 and a usable cgroups manager on the Pulsar host (systemd, or
+cgroupfs with delegation), and without one it fails the task before it starts (`systemd not running on this host,
+cannot use systemd cgroups manager`, exit code 255). That is the case for Pulsar in a container (as in
+`docker-compose.yaml`) and on many batch nodes, so the default `auto` leaves the flags out for `singularity`. Set
+`always` only where `singularity exec --cpus=1 --memory=512m docker://alpine true` works for the Pulsar user. The
+flags also go to the stage-in and stage-out containers, so a task with a small `ram_gb` downloads and uploads its files
+within that memory limit.
+
+**Batch system.** When Pulsar submits jobs to a batch system through one of its DRMAA managers (e.g. SLURM via
+`slurm-drmaa`), the batch system is where limits belong: it reserves the resources when scheduling and enforces them
+for the whole job, staging included. With the templates set, `TESP API` submits each job to Pulsar's REST interface with a
+`native_specification` built from the task's resources, e.g. `--cpus-per-task=2 --mem=1536`. The CPU template may use
+`{cpu_cores}`, the memory template `{ram_gb}` and `{ram_mib}` (`ram_gb` in whole MiB, rounded up); a template is left
+out when the task does not request that resource. Pulsar uses it only when its DRMAA manager has no
+`native_specification` of its own (otherwise Pulsar logs a warning and keeps its own). Pulsar's local queue and CLI
+managers ignore it; the HTCondor manager would write it into the submit file as an unknown `native_specification`
+command, so leave the templates empty there.
+
+&nbsp;
+### Waiting for Pulsar jobs
+`TESP API` requests the status of each submitted job from Pulsar until the job is complete, however long it queues or
+runs (in a batch system, a task may wait for resources for hours). The wait between requests grows on long jobs so they
+do not load Pulsar.
+
+| Setting | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `pulsar.status.poll_interval` | `TESP_API_PULSAR__STATUS__POLL_INTERVAL` | `4` | Seconds from submission to the first status request; each later wait is 1.25 times longer |
+| `pulsar.status.max_poll_interval` | `TESP_API_PULSAR__STATUS__MAX_POLL_INTERVAL` | `60` | Longest wait between status requests, in seconds (when unset and `poll_interval` is larger: `poll_interval`) |
+| `pulsar.status.max_wait_seconds` | `TESP_API_PULSAR__STATUS__MAX_WAIT_SECONDS` | `0` | Longest a job may queue and run, in seconds; `0` means no limit. Past it `TESP API` asks Pulsar to cancel the job and the task ends in `SYSTEM_ERROR` with the reason in its system logs |
+| `pulsar.status.error_retry_seconds` | `TESP_API_PULSAR__STATUS__ERROR_RETRY_SECONDS` | `600` | How long connection errors, timeouts and 5xx/429 answers from Pulsar are retried before the task ends in `SYSTEM_ERROR`; a good answer starts the count again. `0` disables retries |
+
+A job that never finishes in Pulsar (e.g. a batch job pending on resources the cluster cannot provide) keeps its task
+`RUNNING` until it is canceled, unless `max_wait_seconds` is set. Other answers from Pulsar (4xx, a malformed status)
+end the task in `SYSTEM_ERROR` at once.
+
+`pulsar.status.max_polls` is deprecated and ignored (it used to fail every task still running after
+`max_polls` × `poll_interval`, about 27 minutes by default); `TESP API` logs a warning at startup when it is set.
+
+Canceling a task (`POST /v1/tasks/{id}:cancel`) is noticed at the next status request, which then stops and cancels
+the Pulsar job, so it can take up to `max_poll_interval` seconds. Tasks with S3 outputs must also finish within
+`s3.output_presign_expiry_seconds`, see below.
+
+&nbsp;
 ### S3 inputs and outputs
 Inputs and outputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
 TES executor with an S3 work dir). The S3 endpoint and credentials are configured on the server, never in the URL:
@@ -190,8 +244,11 @@ TESP_API_S3__SECRET_ACCESS_KEY=...
 
 How it works: when a task starts, `TESP API` turns each S3 input into a presigned `GET` URL (computed locally, no request
 to S3) and the Pulsar staging container downloads it with `curl`. The secret key never leaves `TESP API`. The presigned
-URLs are kept out of the job's shell trace (stored as the task's stderr) and out of the `TESP API` log of the job command,
-so they are not stored with the task; botocore's debug logging, which would show the signature, is turned off. They are part of the job command sent to Pulsar (as a query parameter of the
+URLs are kept out of the task's stored stdout/stderr (the job script Pulsar runs is not traced, so neither the
+container commands nor executor env values are echoed there) and out of the `TESP API` log: the job command is logged
+with signatures, credentials and POST policies removed, Pulsar requests are logged by method and path only, and Pulsar
+error messages are redacted the same way. botocore's debug logging, which would show the signature, is turned off. CI
+fails when the compose logs contain presigned URLs (`ci/scan-logs.sh`) and then neither prints nor uploads them. They are part of the job command sent to Pulsar (as a query parameter of the
 Pulsar REST call), so they can appear in Pulsar's and any proxy's logs until they expire. Keep
 `s3.presign_expiry_seconds` no longer than the time tasks may wait in Pulsar before staging starts.
 
@@ -223,7 +280,11 @@ Limitations:
 Executor values are passed to `docker run` / `singularity exec` literally (never expanded by the host shell).
 Values that cannot be passed safely are refused with `400 Bad Request`, naming the field (e.g. `executors[0].env`):
 - environment variable names must match `[A-Za-z_][A-Za-z0-9_]*`;
-- images must not start with `-`;
+- images must be registry images: a Docker reference such as `alpine:3.20`, or a `docker://`, `library://`,
+  `shub://` or `oras://` URI. Empty images, host paths (`/images/x.sif`, `./x`, or any image starting with `/`, `.`
+  or `-`), `instance://` and other URI schemes (matched case-sensitively) are refused, because Singularity would run
+  a host directory or file as the container, as the Pulsar user. Pre-pulled `.sif` images on the Pulsar host are not
+  supported;
 - input paths, volumes and the directories of output paths must not contain `:` or `,`, which separate mount specs for
   Docker and Singularity.
 
@@ -355,8 +416,9 @@ longer configured to redirect stdout into the file.
 |----------|:-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | _Pulsar_ | `TESP API` should be able to dispatch executions to multiple `Pulsar` services via different types of `Pulsar` interfaces. Currently, only one `Pulsar` service is supported       |
 | _Pulsar_ | `Pulsar` must be "polled" for job state. Preferably `Pulsar` should notify `TESP API` about state change. This is already default behavior when using `Pulsar` with message queues |
-| _TES_    | Canceling a `TES` task calls Pulsar's cancel endpoint but container termination depends on Pulsar/runtime behavior. In-flight tasks may still complete.                             |
-| _TES_    | Only `cpu_cores` and `ram_gb` are mapped to container runtime flags. Other resource fields (disk, preemptible, zones) are stored but not enforced.                                  |
+| _TES_    | Canceling a `TES` task calls Pulsar's cancel endpoint at the next status request (see [Waiting for Pulsar jobs](#waiting-for-pulsar-jobs)) but container termination depends on Pulsar/runtime behavior. In-flight tasks may still complete. |
+| _TES_    | Waiting for Pulsar jobs happens in the `TESP API` process and is not resumed when it starts again. Tasks that are queued, initializing or running when it stops or restarts never get their logs or final state: currently, after a clean shutdown they show `CANCELED` (the shutdown handler fails before it cancels their Pulsar jobs), after a crash they keep their state, and in both cases their Pulsar jobs go on. |
+| _TES_    | Only `cpu_cores` and `ram_gb` are used, as container runtime flags and/or a batch-system native specification (see [Task resources](#task-resources-cpu-and-memory)); with the default settings they are not enforced for `singularity`. Other resource fields (disk, preemptible, zones) are stored but not enforced. |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
 | _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's stderr) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |

@@ -119,6 +119,7 @@ All task JSON fixtures are in `test_jsons/`. Key files:
 | `state_true.json` | Simple task that should succeed | No |
 | `state_false.json` | Task designed to fail | No |
 | `cancel.json` | Long-running task (`sleep infinity`) for cancellation | No |
+| `long_running.json` | Runs longer than the legacy Pulsar poll limit of the compose profile | No |
 | `multi_true.json` | Three sequential executors | No |
 | `inputs.json` | HTTP download + inline content | **Yes** |
 | `dir-io.json` | Directory input/output via HTTP | **Yes** |

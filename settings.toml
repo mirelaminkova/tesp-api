@@ -1,9 +1,28 @@
 [default]
 db.mongodb_uri = "mongodb://localhost:27017"
 pulsar.url = "http://localhost:8913"
+# Waiting for a Pulsar job: tesp-api requests its status until the job is complete. The first request comes
+# poll_interval seconds after submission and each later wait is 1.25 times longer, up to max_poll_interval seconds.
+# max_wait_seconds > 0 limits how long a job may queue and run: past it the Pulsar job is canceled and the task set to
+# SYSTEM_ERROR. Connection errors, timeouts and 5xx/429 answers from Pulsar are retried until they have lasted
+# error_retry_seconds without a good answer in between (0 = not retried). pulsar.status.max_polls is deprecated and
+# ignored.
 pulsar.status.poll_interval = 4
-pulsar.status.max_polls = 400
+pulsar.status.max_poll_interval = 60
+pulsar.status.max_wait_seconds = 0
+pulsar.status.error_retry_seconds = 600
 pulsar.client_timeout = 30
+# Per-job DRMAA native specification built from the task's TES resources, used when Pulsar submits to a batch system
+# through a DRMAA manager (e.g. SLURM) that has no native_specification of its own. Each template is used only when the
+# task requests that resource. Placeholders: {cpu_cores} in the first, {ram_gb} and {ram_mib} (ram_gb in whole MiB,
+# rounded up) in the second. Sent with Pulsar's REST interface.
+pulsar.native_specification.cpu_cores = ""  # e.g. "--cpus-per-task={cpu_cores}" for SLURM
+pulsar.native_specification.ram_gb = ""     # e.g. "--mem={ram_mib}" for SLURM
+
+# Put TES resources (cpu_cores, ram_gb) on the container command line as --cpus/--memory:
+# "auto" for docker only, "always" for docker and singularity, "never" for neither. Apptainer needs a usable cgroups
+# manager (cgroups v2 with systemd or delegation) for these flags and fails the task without one.
+container.resource_limits = "auto"
 
 logging.level = "DEBUG"
 logging.output_json = false

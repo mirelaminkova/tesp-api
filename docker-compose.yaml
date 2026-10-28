@@ -12,6 +12,11 @@ services:
       - TESP_API_S3__ENDPOINT_URL=http://172.17.0.1:9000
       - TESP_API_S3__ACCESS_KEY_ID=tesp-test
       - TESP_API_S3__SECRET_ACCESS_KEY=tesp-test-secret  # local test credentials only
+      # Quick Pulsar status polling for the tests. The legacy poll limit (5 × 1 s) is far shorter than
+      # tests/smoke_tests.py::test_task_outlives_legacy_poll_limit; it is deprecated and ignored (issue #49).
+      - TESP_API_PULSAR__STATUS__POLL_INTERVAL=1
+      - TESP_API_PULSAR__STATUS__MAX_POLL_INTERVAL=2
+      - TESP_API_PULSAR__STATUS__MAX_POLLS=5
     container_name: tesp-api
     privileged: true
     ports:
