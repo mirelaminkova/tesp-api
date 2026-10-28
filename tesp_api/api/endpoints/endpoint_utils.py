@@ -74,10 +74,15 @@ def parse_verify_token(
     basic_credentials: HTTPBasicCredentials = Depends(basic_auth_scheme)
 ):
     if properties.basic_auth.enable:
+        if basic_credentials is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="Missing BasicAuth credentials",
+                                headers={"WWW-Authenticate": "Basic"})
         try:
             return verify_basic_auth(basic_credentials.username, basic_credentials.password)
         except BasicAuthError as e:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e))
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(e),
+                                headers={"WWW-Authenticate": "Basic"})
 
     if not properties.oauth.enable:
         return None
