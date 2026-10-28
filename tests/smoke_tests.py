@@ -200,6 +200,22 @@ def test_outputs():
     assert not os.path.exists(f"{uploaded}/outputs_http_missing.txt")
     _assert_skipped(task_id, ["/data/http_out/outputs_http_missing.txt", "/data/http_out/outputs_http_missing_dir"])
 
+# Outputs are uploaded also when an executor fails (issue #30): Nextflow reads .exitcode and .command.err to report
+# the failure. The task still ends in EXECUTOR_ERROR.
+def test_outputs_uploaded_after_executor_error():
+    token = f"failed-{time.time_ns()}"
+    task = {
+        "outputs": [{"path": "/data/failed_out/outputs_failed_exitcode",
+                     "url": "http://172.17.0.1:5000/upload", "type": "FILE"}],
+        "executors": [{"image": "ubuntu", "command": [
+            "sh", "-c", f"mkdir -p /data/failed_out && echo {token} > /data/failed_out/outputs_failed_exitcode; exit 3"]}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "EXECUTOR_ERROR", 120)
+
+    with open(f"{script_directory}/uploaded_data/outputs_failed_exitcode") as f:
+        assert f.read() == f"{token}\n"
+
 def _assert_skipped(task_id, paths):
     """The stage-out script reports each skipped output on a line of its own in the task's stderr."""
     task = _get_request(f"/v1/tasks/{task_id}?view=FULL")
