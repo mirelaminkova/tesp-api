@@ -1,6 +1,6 @@
 import pytest
 
-from tesp_api.repository.model.task import TesTask, find_invalid_container_fields
+from tesp_api.repository.model.task import TesTask, find_invalid_container_fields, find_relative_stdio_paths
 
 
 def _task(**overrides):
@@ -38,3 +38,20 @@ def test_mount_separator_in_output_file_name_is_allowed():
     # Outputs are mounted by their directory only
     task = _task(outputs=[{"path": "/data/sample:1,2.txt", "url": "http://example.org/upload", "type": "FILE"}])
     assert find_invalid_container_fields(task) == []
+
+
+@pytest.mark.parametrize("stream", ["stdin", "stdout", "stderr"])
+@pytest.mark.parametrize("path", ["out.txt", "./out.txt", "data/out.txt", "../out.txt", ""])
+def test_relative_stdio_path_names_the_field(stream, path):
+    assert find_relative_stdio_paths(_task(executor={stream: path})) == [f"executors[1].{stream}"]
+
+
+def test_absolute_stdio_paths_are_accepted():
+    task = _task(executor={"stdin": "/data/in", "stdout": "/tmp/out.log", "stderr": "/tmp/err.log"})
+    assert find_relative_stdio_paths(task) == []
+
+
+def test_every_relative_stdio_path_is_named():
+    task = TesTask(executors=[{"image": "ubuntu", "command": ["true"], "stdout": "out", "stderr": "/err"},
+                              {"image": "ubuntu", "command": ["true"], "stdin": "in", "stderr": "err"}])
+    assert find_relative_stdio_paths(task) == ["executors[0].stdout", "executors[1].stdin", "executors[1].stderr"]
