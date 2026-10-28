@@ -77,7 +77,7 @@ def test_redacts_get_url_and_post_fields():
     _assert_clean(redacted)
     assert "https://s3.example.org/my-bucket/work/in.txt?" in redacted
     assert "X-Amz-Expires=" in redacted  # parameters that are not secret stay
-    assert redacted.startswith("set -e && curl -fsSg -o /data/in.txt '")
+    assert redacted.startswith("set -e; { curl -fsSg -o /data/in.txt '")
 
 
 def test_redacts_url_encoded_command_line():
