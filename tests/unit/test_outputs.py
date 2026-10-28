@@ -396,9 +396,11 @@ def test_stage_out_command_contains_no_s3_url_or_secret():
         assert "s3://" not in command
         assert SECRET_KEY not in command
         assert "https://s3.example.org/my-bucket/work/out.txt?" in command
-        # The script survives the extra quoting of the container command line.
-        script = shlex.split(command)[-1]
-        assert script == stage_out_script(staged)
+        # The script survives the extra quoting of the container command line; printf feeds it to `sh -s`.
+        tokens = shlex.split(command)
+        start = tokens.index("printf")  # singularity creates the bind mount directory first
+        assert tokens[start:start + 4] == ["printf", "%s\\n", "{", stage_out_script(staged)]
+        assert tokens[-2:] == ["sh", "-s"]
 
 
 # --- review round: validation and robustness ------------------------------------

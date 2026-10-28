@@ -49,7 +49,8 @@ STUB = f"""#!{sys.executable}
 import json, os, sys
 with open(os.environ["STUB_LOG"], "a") as log:
     log.write(json.dumps({{"argv": [os.path.basename(sys.argv[0]), *sys.argv[1:]],
-                          "env": {{k: v for k, v in os.environ.items() if k.startswith(("APPTAINERENV_", "SINGULARITYENV_"))}}}}) + "\\n")
+                          "env": {{k: v for k, v in os.environ.items() if k.startswith(("APPTAINERENV_", "SINGULARITYENV_"))}},
+                          "stdin": sys.stdin.read()}}) + "\\n")
 """
 
 
@@ -71,7 +72,7 @@ def _run_with_stubs(command: str, tmp_path: Path):
         stub.chmod(0o755)
     log = tmp_path / "calls.jsonl"
     result = subprocess.run(["sh", "-c", command], capture_output=True, text=True, timeout=10,
-                            env={"PATH": f"{bin_dir}:/usr/bin:/bin", "STUB_LOG": str(log)})
+                            stdin=subprocess.DEVNULL, env={"PATH": f"{bin_dir}:/usr/bin:/bin", "STUB_LOG": str(log)})
     assert result.returncode == 0, result.stderr
     assert not os.path.exists(MARKER), "a task value was executed by the host shell"
     return [json.loads(line) for line in log.read_text().splitlines()]
@@ -82,6 +83,16 @@ def _runtime_call(calls):
     runtime_calls = [call for call in calls if call["argv"][0] in ("docker", "singularity")]
     assert len(runtime_calls) == 1, calls
     return runtime_calls[0]
+
+
+def _stdin_script(call):
+    """The stage script a container got on stdin (issue #32), checking that it was not on its command line."""
+    assert call["argv"][-2:] == ["sh", "-s"]
+    if call["argv"][0] == "docker":
+        assert "--rm" in call["argv"] and "--interactive" in call["argv"]
+    stdin = call["stdin"]
+    assert stdin.startswith("{\n") and stdin.endswith("\n} </dev/null\n"), stdin
+    return stdin[len("{\n"):-len("\n} </dev/null\n")]
 
 
 def _builder(container_type, image="ubuntu"):
@@ -256,9 +267,8 @@ def test_stage_in_passes_url_intact(container_type, value, tmp_path):
 
     command = stage_in_command(stage_exec, {}, "/staging/inputs", input_confs, container_type)
 
-    argv = _runtime_call(_run_with_stubs(command, tmp_path))["argv"]
-    assert argv[-3:-1] == ["sh", "-c"]
-    assert shlex.split(argv[-1]) == ["curl", "-f", "-o", "input_file_0", url]
+    call = _runtime_call(_run_with_stubs(command, tmp_path))
+    assert shlex.split(_stdin_script(call)) == ["curl", "-f", "-o", "input_file_0", url]
 
 
 @pytest.mark.parametrize("container_type", CONTAINER_TYPES)
@@ -312,9 +322,8 @@ def test_stage_out_script_reaches_the_container_intact(container_type, value, tm
     command = stage_out_command(stage_exec, {}, output_confs, volume_confs, container_type,
                                 bind_mount="/staging/inputs")
 
-    argv = _runtime_call(_run_with_stubs(command, tmp_path))["argv"]
-    assert argv[-3:-1] == ["sh", "-c"]
-    assert argv[-1] == stage_out_script(output_confs)
+    call = _runtime_call(_run_with_stubs(command, tmp_path))
+    assert _stdin_script(call) == stage_out_script(output_confs)
 
 
 @pytest.mark.parametrize("value", HOSTILE, ids=HOSTILE_IDS)
