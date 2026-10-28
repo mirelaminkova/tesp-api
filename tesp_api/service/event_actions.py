@@ -14,6 +14,7 @@ from tesp_api.utils.container import stage_in_command, run_command, stage_out_co
 from tesp_api.utils.job_script import job_script
 from tesp_api.service.pulsar_service import pulsar_service
 from tesp_api.service.resources import get_resource_config
+from tesp_api.service.image_dir import get_allowed_image_dir
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.service.event_handler import Event, local_handler
@@ -233,7 +234,7 @@ async def handle_run_task(event: Event) -> None:
                 volume_confs=volume_confs, input_confs=input_confs, output_confs=output_confs,
                 inputs_directory=stage_in_mount, container_type=CONTAINER_TYPE,
                 job_directory=payload['task_config'].get('job_directory') if CONTAINER_TYPE == "singularity" else None,
-                executor_index=i
+                executor_index=i, allowed_image_dir=get_allowed_image_dir()
             )
             container_cmds.append(run_cmd)
 

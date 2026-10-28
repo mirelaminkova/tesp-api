@@ -23,6 +23,9 @@ pulsar.native_specification.ram_gb = ""     # e.g. "--mem={ram_mib}" for SLURM
 # "auto" for docker only, "always" for docker and singularity, "never" for neither. Apptainer needs a usable cgroups
 # manager (cgroups v2 with systemd or delegation) for these flags and fails the task without one.
 container.resource_limits = "auto"
+# Singularity/Apptainer only: a directory on the Pulsar host with pre-pulled images (e.g. "/srv/images"). Executors may
+# then name an image file below it by absolute path, e.g. /srv/images/tool.sif. Empty: host-path images are refused.
+container.allowed_image_dir = ""
 
 logging.level = "DEBUG"
 logging.output_json = false
