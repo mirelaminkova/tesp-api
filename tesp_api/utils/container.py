@@ -38,6 +38,8 @@ class ContainerCommandBuilder:
         self._stdin: Maybe[str] = Nothing
         self._stdout: Maybe[str] = Nothing
         self._stderr: Maybe[str] = Nothing
+        self._script: Maybe[str] = Nothing
+        self._remove = False
 
     def with_job_id(self, job_id: str):
         self._job_id = job_id
@@ -117,6 +119,21 @@ class ContainerCommandBuilder:
 
         return self
 
+    def with_stdin_script(self, script: str):
+        """
+        Runs ``script`` with ``sh -s`` in the container, fed on stdin by the host shell's ``printf`` builtin, so it
+        appears in no process argv (``ps``) and not in the container's configuration (``docker inspect``). Used for
+        the stage scripts, which hold presigned URLs (issue #32). Replaces ``with_command``.
+        """
+        self._script = Just(script)
+        self._command = Just(["sh", "-s"])
+        return self
+
+    def with_auto_remove(self):
+        """Removes the container when it exits (``docker run --rm``); singularity keeps no containers."""
+        self._remove = True
+        return self
+
     def _is_shell_wrapped(self, command) -> bool:
         if isinstance(command, list):
             return len(command) >= 2 and command[0] == "sh" and command[1] == "-c"
@@ -178,6 +195,8 @@ class ContainerCommandBuilder:
         self._stdin = Nothing
         self._stdout = Nothing
         self._stderr = Nothing
+        self._script = Nothing
+        self._remove = False
         return self
 
     def get_run_command(self) -> str:
@@ -241,8 +260,17 @@ class ContainerCommandBuilder:
         # Build final command
         # --no-eval: Apptainer otherwise shell-evaluates env values inside the container, unlike docker
         runtime = "docker run" if docker else "singularity exec --no-eval"
+        script = self._script.maybe(None, lambda value: value)
+        run_flags = [flag for flag, wanted in (("--rm", self._remove), ("--interactive", script is not None))
+                     if docker and wanted]
         container_cmd = " ".join(filter(None, [
-            *env_prefix, runtime, cpu_flag, mem_flag, workdir_flag, *env_flags, *mount_flags, image, command_str]))
+            *env_prefix, runtime, *run_flags, cpu_flag, mem_flag, workdir_flag, *env_flags, *mount_flags, image,
+            command_str]))
+        if script is not None:
+            # The script is parsed as one `{ ... }` group before any of it runs, and runs with stdin from /dev/null,
+            # so a command in it that reads stdin cannot consume the rest of the script. printf puts the braces on
+            # lines of their own, so the command line itself gains no newline.
+            container_cmd = f"printf '%s\\n' '{{' {shlex.quote(script)} '}} </dev/null' | {container_cmd}"
         return " && ".join([*mkdir_cmds, container_cmd])
 
 
@@ -283,7 +311,8 @@ def stage_in_command(
         .with_workdir(executor.workdir) \
         .with_resource(resource_conf) \
         .with_directory(bind_mount) \
-        .with_command(["sh", "-c", " && ".join(commands)])
+        .with_stdin_script(" && ".join(commands)) \
+        .with_auto_remove()
 
     builder.with_bind_mount(executor.workdir, bind_mount)
     
@@ -348,11 +377,12 @@ def stage_out_command(
     builder = ContainerCommandBuilder(container_type) \
         .with_image(executor.image) \
         .with_workdir(executor.workdir) \
-        .with_resource(resource_conf)
+        .with_resource(resource_conf) \
+        .with_auto_remove()
 
     script = stage_out_script(output_confs)
     if script:
-        builder.with_command(["sh", "-c", script])
+        builder.with_stdin_script(script)
 
     # Mount required directories
     if container_type == "singularity" and bind_mount:
