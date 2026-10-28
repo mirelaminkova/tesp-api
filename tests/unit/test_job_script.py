@@ -2,12 +2,20 @@
 
 Pulsar stores the job's stderr as ``ExecutorLog.stderr``, so the script must not trace itself (``set -x``): the trace
 would put executor env values, presigned URLs and host paths into the task's logs. The tests run the script with the
-host's ``sh``, with ``echo``/``false`` standing in for the container commands.
+host's ``sh``, with ``echo``/``false`` standing in for the container commands, in a temporary directory standing in
+for Pulsar's job working directory (the script writes marker files there).
 """
 import shlex
 import subprocess
 
+import pytest
+
 from tesp_api.utils.job_script import job_script
+
+
+@pytest.fixture(autouse=True)
+def _in_job_working_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
 
 SECRET = "s3cr3t"
 SIGNED_URL = "https://s3.example.org/b/k?X-Amz-Credential=AKIA&X-Amz-Signature=abc123"

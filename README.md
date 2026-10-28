@@ -220,6 +220,11 @@ Canceling a task (`POST /v1/tasks/{id}:cancel`) is noticed at the next status re
 the Pulsar job, so it can take up to `max_poll_interval` seconds. Tasks with S3 outputs must also finish within
 `s3.output_presign_expiry_seconds`, see below.
 
+A task ends in `EXECUTOR_ERROR` when an executor exits with a non-zero code. When downloading the inputs (stage-in) or
+uploading the outputs (stage-out) fails, or Pulsar or the batch system does not start the job (for example, SLURM
+rejects a `ram_gb` no node has), the task ends in `SYSTEM_ERROR` instead, with the reason and the end of the stage's
+output in `logs[].system_logs` (`view=FULL`). Executors that did not run get no executor log.
+
 &nbsp;
 ### S3 inputs and outputs
 Inputs and outputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
