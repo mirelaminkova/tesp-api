@@ -8,13 +8,13 @@ from fastapi.params import Depends
 from fastapi import APIRouter, Body
 from fastapi.responses import Response, JSONResponse
 
-from tesp_api.api.error import api_handle_error, get_error_response_model, get_response_for_error_model
+from tesp_api.api.error import api_handle_error, get_error_response_model, get_response_for_error_model, \
+    disallowed_s3_outputs_error
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog, \
     find_unsupported_s3_urls, find_unsupported_outputs, find_invalid_container_fields
 from tesp_api.utils.functional import maybe_of, identity_with_side_effect
-from tesp_api.service.client.client_s3 import find_disallowed_s3_outputs
 from tesp_api.api.model.task_service_info import TesServiceInfo, TesServiceType, TesServiceOrganization
 from tesp_api.api.model.response_models import \
     TesGetAllTasksResponseModel,\
@@ -52,12 +52,9 @@ async def create_task(
                     f"inputs are not supported yet, and S3 DIRECTORY output keys must not contain ${{filename}}). "
                     f"Credentials, host and port in S3 URLs are not accepted; the S3 endpoint and "
                     f"credentials are configured on the server."))
-    disallowed_s3_outputs = find_disallowed_s3_outputs(tes_task.outputs, token_subject)
+    disallowed_s3_outputs = disallowed_s3_outputs_error(tes_task.outputs, token_subject)
     if disallowed_s3_outputs:
-        return get_response_for_error_model(get_error_response_model(
-            HTTPStatus.FORBIDDEN,
-            message=f"S3 output not allowed in {', '.join(disallowed_s3_outputs)}: the server only accepts S3 "
-                    f"outputs under its configured bucket/key prefixes (s3.allowed_output_prefixes)."))
+        return get_response_for_error_model(disallowed_s3_outputs)
     unsupported_outputs = find_unsupported_outputs(tes_task)
     if unsupported_outputs:
         return get_response_for_error_model(get_error_response_model(

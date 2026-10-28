@@ -1,6 +1,6 @@
 import time
 from http import HTTPStatus
-from typing import List
+from typing import List, Optional
 
 from loguru import logger
 from bson.errors import InvalidId
@@ -10,6 +10,7 @@ from pydantic.error_wrappers import ValidationError
 
 from tesp_api.repository.error import CustomDataLayerError
 from tesp_api.api.model.response_models import ErrorResponseModel
+from tesp_api.service.client.client_s3 import find_disallowed_s3_outputs
 
 
 def get_error_response_model(error_status: HTTPStatus, message: str) -> ErrorResponseModel:
@@ -18,6 +19,17 @@ def get_error_response_model(error_status: HTTPStatus, message: str) -> ErrorRes
         error=error_status.phrase,
         status=error_status.value,
         message=message)
+
+
+def disallowed_s3_outputs_error(outputs, user: Optional[str]) -> Optional[ErrorResponseModel]:
+    """403 for S3 outputs outside s3.allowed_output_prefixes for ``user`` (issue #33), naming the fields only."""
+    fields = find_disallowed_s3_outputs(outputs, user)
+    if not fields:
+        return None
+    return get_error_response_model(
+        HTTPStatus.FORBIDDEN,
+        message=f"S3 output not allowed in {', '.join(fields)}: the server only accepts S3 outputs under its "
+                f"configured bucket/key prefixes (s3.allowed_output_prefixes).")
 
 
 def get_response_for_error_model(error_model: ErrorResponseModel) -> Response:

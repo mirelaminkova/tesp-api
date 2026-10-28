@@ -1,5 +1,4 @@
 """Server-side allow-list of S3 output buckets and key prefixes, optionally per user (issue #33)."""
-import asyncio
 import json
 import os
 import sys
@@ -8,7 +7,7 @@ import pydantic
 import pytest
 from loguru import logger
 
-from tesp_api.api.endpoints.task_endpoints import create_task
+from tesp_api.api.error import disallowed_s3_outputs_error, get_response_for_error_model
 from tesp_api.config.properties import get_properties
 from tesp_api.repository.model.task import TesTask, TesTaskIOType
 from tesp_api.service.client.client_s3 import S3Config, find_disallowed_s3_outputs, is_allowed_output, \
@@ -102,10 +101,13 @@ def test_presign_skips_config_for_non_s3_outputs(monkeypatch):
 
 # --- task creation -----------------------------------------------------------------------------------------------
 
-def test_create_task_refuses_disallowed_outputs(monkeypatch):
+# POST /tasks returns this error before storing the task. The endpoint module itself is not imported: it pulls in
+# motor, whose asyncio framework module does not import on Python 3.11.
+def test_create_task_error_for_disallowed_outputs(monkeypatch):
     monkeypatch.setattr(client_s3, "get_s3_config", lambda: RESTRICTED)
     task = _task("s3://results/shared/ok.txt", "s3://results/users/bob/secret-path.txt")
-    response = asyncio.run(create_task(token_subject="alice", tes_task=task))
+    assert disallowed_s3_outputs_error(task.outputs, "bob") is None
+    response = get_response_for_error_model(disallowed_s3_outputs_error(task.outputs, "alice"))
     assert response.status_code == 403
     body = json.loads(response.body)
     assert "outputs[1].url" in body["message"]
