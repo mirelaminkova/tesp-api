@@ -307,6 +307,15 @@ def test_host_path_image_rejected(image):
     if image != "/":
         assert image not in resp.text
 
+# TES requires absolute executor stdin/stdout/stderr paths; relative ones are refused at task creation, naming the
+# field.
+@pytest.mark.parametrize("stream", ["stdin", "stdout", "stderr"])
+def test_relative_stdio_path_rejected(stream):
+    task = {"executors": [{"image": "alpine", "command": ["true"], stream: "out.txt"}]}
+    resp = requests.post(f"{base_url}/v1/tasks", json=task)  # not _post_request, which expects 200
+    assert resp.status_code == 400
+    assert f"executors[0].{stream}" in resp.text
+
 # Cancels a concrete task in RUNNING state.
 def test_task_cancel():
     response = _test_simple("cancel.json", 60, "RUNNING")

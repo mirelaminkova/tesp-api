@@ -275,6 +275,19 @@ def find_unsupported_outputs(task: TesTask) -> List[str]:
     ]
 
 
+def find_relative_stdio_paths(task: TesTask) -> List[str]:
+    """
+    Returns the fields (e.g. ``executors[0].stdout``) holding executor ``stdin``, ``stdout`` or ``stderr`` paths that
+    are not absolute, which TES requires: a relative path would depend on the container's working directory.
+    """
+    return [
+        f"executors[{i}].{stream}"
+        for i, executor in enumerate(task.executors)
+        for stream in ("stdin", "stdout", "stderr")
+        if getattr(executor, stream) is not None and not str(getattr(executor, stream)).startswith("/")
+    ]
+
+
 ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Separate the parts of `docker run --volume=host:container[:options]` and the binds of `singularity --bind`.
 MOUNT_PATH_SEPARATORS = (":", ",")
