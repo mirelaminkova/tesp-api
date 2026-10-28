@@ -1,7 +1,7 @@
 import os
 import re
 import shlex
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from typing import Dict, List, Tuple, Optional, Union
 
 from pymonad.maybe import Nothing, Maybe, Just
@@ -343,14 +343,15 @@ def stage_out_command(
     volume_confs: List[dict],
     container_type: str,
     bind_mount: Optional[str] = None,
-    job_directory: Optional[str] = None
+    job_directory: Optional[str] = None,
+    output_log_marker: Optional[str] = None
 ) -> str:
     builder = ContainerCommandBuilder(container_type) \
         .with_image(executor.image) \
         .with_workdir(executor.workdir) \
         .with_resource(resource_conf)
 
-    script = stage_out_script(output_confs)
+    script = stage_out_script(output_confs, output_log_marker)
     if script:
         builder.with_command(["sh", "-c", script])
 
@@ -380,7 +381,7 @@ def _curl_quoted(value: str) -> str:
 # curl -F (see _curl_quoted). The "_" keeps a trailing newline of a file name from being stripped by $(...).
 _DIRECTORY_LOOP = (
     'for f; do r=${f#./}; q=$(printf "%s_" "$r" | sed \'s/[\\\\"]/\\\\&/g\'); q=${q%_}; '
-    '{upload} || exit 1; done'
+    '{upload} || exit 1; {report}done'
 )
 # Files per upload loop. BusyBox find -exec ... + can build an argument list that is too long and then silently skips
 # files, so the batches are bounded with xargs.
@@ -388,6 +389,19 @@ _DIRECTORY_BATCH = 100
 
 
 # All curl calls use -g (--globoff): curl would otherwise expand {a,b} and [1-2] in task-provided URLs.
+
+
+def _output_report(marker: Optional[str], index: int, file: str, relative: str = "") -> str:
+    """
+    Command that prints the output file log line of an uploaded file (see ``output_file_logs``), or ``""`` without a
+    marker. A name with a newline would split the line, so such files are not reported.
+    """
+    if not marker:
+        return ""
+    line = f"printf '%s\\t%s\\t%s\\t%s\\n' {marker} {index} \"$(wc -c < {file})\" {relative or shlex.quote('')}"
+    if not relative:
+        return line
+    return f'if [ "$(printf "%s" {relative} | wc -l)" -eq 0 ]; then {line}; fi'
 
 
 def _file_upload(conf: dict, path: str) -> str:
@@ -398,7 +412,7 @@ def _file_upload(conf: dict, path: str) -> str:
     return f"curl -fsSg -X POST -F {shlex.quote('file=@' + _curl_quoted(path))} {url}"
 
 
-def _directory_upload(conf: dict, path: str) -> str:
+def _directory_upload(conf: dict, path: str, report: str = "") -> str:
     url = shlex.quote(conf['url'])
     if conf.get('upload') == 's3_post':
         # --form-string sends values literally. S3 ignores fields after the file, so the file goes last.
@@ -413,7 +427,7 @@ def _directory_upload(conf: dict, path: str) -> str:
     else:
         # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
         upload = f"curl -fsSg -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
-    loop = _DIRECTORY_LOOP.replace("{upload}", upload)
+    loop = _DIRECTORY_LOOP.replace("{upload}", upload).replace("{report}", f"{report}; " if report else "")
     # Symbolic links are not followed, as they could point outside the directory or form loops; each is reported.
     # The status of find is lost in the pipe, so a first find pass fails the upload on e.g. unreadable directories.
     # xargs fails if an upload fails.
@@ -424,26 +438,61 @@ def _directory_upload(conf: dict, path: str) -> str:
     )
 
 
-def stage_out_script(output_confs: List[dict]) -> str:
+def stage_out_script(output_confs: List[dict], output_log_marker: Optional[str] = None) -> str:
     """
     Shell script that uploads the outputs, run in the stage-out container after the executors. HTTP(S) outputs are
     sent as multipart ``POST`` (form field ``file``), S3 outputs (see ``presign_s3_outputs``) with a presigned ``PUT``
     (FILE) or presigned POST policy (DIRECTORY). DIRECTORY outputs upload every file below the directory, keeping
     their relative paths. Outputs whose path does not exist are skipped with a message on stderr: TES has no notion of
     optional outputs, and clients such as Nextflow check for missing outputs themselves. A failed upload fails the
-    script.
+    script. With ``output_log_marker``, each uploaded file is reported on stdout for ``output_file_logs``.
     """
     commands = []
-    for conf in output_confs:
+    for i, conf in enumerate(output_confs):
         path = conf['container_path']
         if conf.get('type', TesTaskIOType.FILE) == TesTaskIOType.DIRECTORY:
-            upload = _directory_upload(conf, path)
+            upload = _directory_upload(conf, path, _output_report(output_log_marker, i, '"$f"', '"$r"'))
         else:
             upload = _file_upload(conf, path)
+            report = _output_report(output_log_marker, i, shlex.quote(path))
+            if report:
+                upload = f"{upload} && {report}"
         # Only a path that does not exist is skipped; one of the wrong type makes the upload (cd or curl) fail.
         skipped = shlex.quote(f"tesp-api: output {path} not found, skipped")
         commands.append(f"if [ -e {shlex.quote(path)} ]; then {upload}; else echo {skipped} >&2; fi")
     return " && ".join(commands)
+
+def output_file_logs(stdout: str, marker: str, output_confs: List[dict]) -> Tuple[str, List[dict]]:
+    """
+    Splits the output file log lines that ``stage_out_script`` printed with ``marker`` off a job's ``stdout``.
+    Returns the rest of ``stdout`` and a ``TesOutputFileLog`` (url, path, size_bytes) for each uploaded file, from
+    the job's own ``output_confs``, so the URL is the task's (``s3://...``), never a presigned one. A file of a
+    DIRECTORY output gets the output's path and URL joined with its relative path; that is percent-encoded in the
+    URL. The marker is random per job, so an executor cannot forge the lines; a line cut off by the stdout tail
+    (``job_streams``) is dropped.
+    """
+    kept, logs = [], []
+    for line in stdout.splitlines(keepends=True):
+        start = line.find(marker + "\t")
+        if start < 0:
+            kept.append(line)
+            continue
+        # curl may print a response body without a trailing newline before the line; it is kept.
+        if start:
+            kept.append(line[:start] + "\n")
+        fields = line[start + len(marker) + 1:].rstrip("\n").split("\t", 2)
+        if len(fields) != 3 or not fields[0].isdigit() or int(fields[0]) >= len(output_confs) \
+                or not fields[1].strip().isdigit():
+            continue
+        conf = output_confs[int(fields[0])]
+        relative = fields[2]
+        url, path = str(conf['url']), str(conf['container_path'])
+        if relative:
+            url = url.rstrip("/") + "/" + quote(relative, safe="/")
+            path = path.rstrip("/") + "/" + relative
+        logs.append({'url': url, 'path': path, 'size_bytes': fields[1].strip()})
+    return "".join(kept), logs
+
 
 def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):
     output_confs: List[dict] = []

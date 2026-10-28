@@ -1,6 +1,7 @@
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
+from loguru import logger
 from bson.objectid import ObjectId
 from fastapi.encoders import jsonable_encoder
 from pymonad.maybe import Just, Maybe, Nothing
@@ -8,7 +9,8 @@ from pymonad.maybe import Just, Maybe, Nothing
 from tesp_api.service.error import TaskNotFoundError
 from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.repository.task_repository import task_repository
-from tesp_api.repository.model.task import RegisteredTesTask, TesTaskState, TesTaskLog, TesTaskExecutorLog
+from tesp_api.repository.model.task import RegisteredTesTask, TesTaskState, TesTaskLog, TesTaskExecutorLog, \
+    parse_output_file_logs
 
 
 async def append_task_executor_logs(
@@ -19,7 +21,8 @@ async def append_task_executor_logs(
         command_end_time: datetime,
         stdout: str,
         stderr: str,
-        exit_code: int
+        exit_code: int,
+        output_file_logs: Optional[List[dict]] = None
     ):
     task: RegisteredTesTask = await task_repository.get_task(maybe_of(author), {'_id': task_id, 'state': state}) \
         .map(lambda _task: get_else_throw(_task, TaskNotFoundError(task_id, Just(state))))
@@ -28,6 +31,11 @@ async def append_task_executor_logs(
     logs[-1].logs.append(TesTaskExecutorLog(
         start_time=command_start_time, end_time=command_end_time,
         stdout=stdout, stderr=stderr, exit_code=exit_code))
+    if output_file_logs:
+        valid, invalid = parse_output_file_logs(output_file_logs)
+        for output_file_log in invalid:
+            logger.warning(f"Task {task_id}: output file log of {output_file_log.get('path')!r} is not valid, skipped")
+        logs[-1].outputs = [*(logs[-1].outputs or []), *valid]
     await task_repository.update_task(
         {'_id': task_id, 'state': state},
         {'$set': {'logs': jsonable_encoder(logs)}}
@@ -48,3 +56,4 @@ async def update_last_task_log_time(
         {'_id': task_id, 'state': state},
         {'$set': {'logs': jsonable_encoder(logs)}}
     ).map(lambda _task: get_else_throw(_task, TaskNotFoundError(task_id, Just(state))))
+

@@ -1,4 +1,5 @@
 import os
+import secrets
 import datetime
 from typing import List
 from pathlib import Path
@@ -10,7 +11,8 @@ from pymonad.maybe import Just, Nothing
 from bson.objectid import ObjectId
 from pymonad.promise import Promise, _Promise
 
-from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes
+from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes, \
+    output_file_logs
 from tesp_api.utils.job_script import job_script
 from tesp_api.service.pulsar_service import pulsar_service
 from tesp_api.service.resources import get_resource_config
@@ -237,15 +239,17 @@ async def handle_run_task(event: Event) -> None:
             )
             container_cmds.append(run_cmd)
 
-        # Stage-out command
+        # Stage-out command. It reports each uploaded file on stdout after this per-job marker, for logs[].outputs.
         stage_out_cmd = ""
+        output_log_marker = f"tesp-api-output-{secrets.token_hex(8)}"
         if output_confs:
             stage_out_confs = presign_s3_outputs(output_confs)
             stage_out_cmd = stage_out_command(
                 stage_exec, resource_conf, stage_out_confs, volume_confs,
                 container_type=CONTAINER_TYPE,
                 bind_mount=payload['task_config'].get('inputs_directory') if CONTAINER_TYPE == "singularity" else None,
-                job_directory=payload['task_config'].get('job_directory') if CONTAINER_TYPE == "singularity" else None
+                job_directory=payload['task_config'].get('job_directory') if CONTAINER_TYPE == "singularity" else None,
+                output_log_marker=output_log_marker
             )
 
         # Single job script for Pulsar (untraced, see job_script)
@@ -269,11 +273,15 @@ async def handle_run_task(event: Event) -> None:
             command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled)
 
         command_end_time = datetime.datetime.now(datetime.timezone.utc)
+        stdout, stderr = job_streams(command_status)
+        # From the task's output_confs, not the presigned ones: logs[].outputs carries the task's s3:// URLs.
+        stdout, output_logs = output_file_logs(stdout, output_log_marker, output_confs)
         await append_task_executor_logs(
             task_id, author, TesTaskState.RUNNING,
             command_start_time, command_end_time,
-            *job_streams(command_status),
-            command_status.get('returncode', -1)
+            stdout, stderr,
+            command_status.get('returncode', -1),
+            output_logs
         )
 
         current_task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
