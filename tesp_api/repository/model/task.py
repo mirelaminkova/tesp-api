@@ -97,6 +97,13 @@ class TesTaskResources(BaseModel):
                           "be dependent on the backend system. For example, a system based on a cluster queueing "
                           "system may use this string to define priorty queue to which the job is assigned.",
         example=["us-west-1", "eu-east-2"])
+    backend_parameters: Dict[str, str] = Field(
+        None, description="Key/value pairs for backend configuration. This server honours none of them (see "
+                          "service-info tesResources_backend_parameters); they are stored and returned, but ignored.",
+        example={"VmSize": "Standard_D64_v3"})
+    backend_parameters_strict: bool = Field(
+        False, description="If set to true, tasks with backend_parameters this server cannot honour are refused.",
+        example=False)
 
 
 class TesTaskExecutor(BaseModel):
@@ -273,6 +280,21 @@ def find_unsupported_outputs(task: TesTask) -> List[str]:
         for i, output in enumerate(task.outputs or [])
         if not output.path.startswith("/") or any(c in output.path for c in "*?")
     ]
+
+
+# resources.backend_parameters keys this server honours (advertised in service-info).
+SUPPORTED_BACKEND_PARAMETERS: List[str] = []
+
+
+def find_unsupported_backend_parameters(task: TesTask) -> List[str]:
+    """
+    Returns the keys of ``resources.backend_parameters`` this server cannot honour when the task sets
+    ``backend_parameters_strict``, which TES says must then fail the task. Without the flag they are ignored.
+    """
+    resources = task.resources
+    if not resources or not resources.backend_parameters_strict:
+        return []
+    return sorted(key for key in resources.backend_parameters or {} if key not in SUPPORTED_BACKEND_PARAMETERS)
 
 
 ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

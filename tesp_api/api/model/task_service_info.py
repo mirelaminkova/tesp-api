@@ -70,3 +70,7 @@ class TesServiceInfo(BaseModel):
                                    example=['file:///path/to/local/funnel-storage', 's3://ohsu-compbio-funnel/storage'],
                                    description='Lists some, but not necessarily all, storage locations supported by '
                                                'the service.')
+    tesResources_backend_parameters: List[str] = Field(
+        None, example=['VmSize'],
+        description='Lists the resources.backend_parameters keys the service honours. Others are ignored, or refused '
+                    'when backend_parameters_strict is set.')
