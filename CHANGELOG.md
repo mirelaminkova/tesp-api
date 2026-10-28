@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * In order to get latest version in an automated fashion run `ci/version.sh CHANGELOG.md`
 
+## [Unreleased]
+
+### Fixed
+- A task stays `INITIALIZING` while its Pulsar job is queued in the batch system and becomes `RUNNING`, with its
+  start time, once the job runs (#65)
+
 ## [0.2.0] - 2026-02-10
 
 ### Added
