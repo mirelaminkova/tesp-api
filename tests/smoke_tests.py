@@ -501,3 +501,14 @@ def test_job_script_not_in_task_logs():
         assert leaked not in stdout, leaked
         assert leaked not in stderr, leaked
     _assert_no_s3_secrets_stored(task_id)
+
+# Binary data on an executor's own stdout/stderr (no redirection) must not break Pulsar's job status, which decodes
+# the job's streams as UTF-8 (issue #20). The task ends by the exit code; the logs keep the text around it.
+@pytest.mark.parametrize("exit_code, expected_state", [(0, "COMPLETE"), (3, "EXECUTOR_ERROR")])
+def test_binary_executor_output(exit_code, expected_state):
+    script = f"echo before; head -c 1000 /dev/urandom; head -c 1000 /dev/urandom >&2; echo after; exit {exit_code}"
+    task = {"executors": [{"image": "ubuntu", "command": ["sh", "-c", script]}]}
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, expected_state, 120)
+    stdout = _executor_logs(task_id, "stdout")
+    assert "before" in stdout and "after" in stdout

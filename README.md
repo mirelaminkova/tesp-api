@@ -425,6 +425,7 @@ longer configured to redirect stdout into the file.
 | _TES_    | Outputs are uploaded to `s3://` URLs and to HTTP(S) upload endpoints (multipart `POST`, form field `file`). Other URLs, such as the `ftp://` output in the example above, get the same `curl` multipart `POST`, which is not an FTP upload, so FTP outputs do not work. |
 | _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's stderr). |
 | _TES_    | Output paths must be absolute. Wildcards (`*`, `?`; TES 1.1 `path_prefix` outputs) are not supported and are refused with `400 Bad Request`. |
+| _TES_    | `logs.logs.stdout`/`stderr` hold the last 64 KiB of the task's own output (stage-in, executors and stage-out together), filtered to printable ASCII, tab and line breaks: Pulsar can only report valid UTF-8, so binary output and non-ASCII text are dropped from the log. The task still ends by the exit code. |
 | _TES_    | When an executor sets `stdin`, `stdout` or `stderr`, its image must provide `sh`. `logs.logs.stdout`/`stderr` then hold the last 64 KiB of each redirected stream, filtered to printable ASCII, so non-ASCII text is dropped from the log (the file keeps the exact bytes); without `tail`/`tr` in the image the log copy is empty. |
 
 &nbsp;
