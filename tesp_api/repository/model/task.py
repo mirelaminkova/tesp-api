@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from enum import Enum
 from typing import List, Dict, Union
-from pathlib import Path
+from pathlib import Path, PurePath
 from bson.objectid import ObjectId
 from pydantic import BaseModel, Field
 from pydantic.class_validators import root_validator
@@ -273,6 +273,43 @@ def find_unsupported_outputs(task: TesTask) -> List[str]:
         for i, output in enumerate(task.outputs or [])
         if not output.path.startswith("/") or any(c in output.path for c in "*?")
     ]
+
+
+def find_relative_paths(task: TesTask) -> List[str]:
+    """
+    Returns the fields (e.g. ``inputs[0].path``) holding input paths, volumes or executor workdirs that are not
+    absolute, which TES requires. Output paths are checked by ``find_unsupported_outputs``.
+    """
+    return [
+        *(f"inputs[{i}].path" for i, item in enumerate(task.inputs or []) if not item.path.startswith("/")),
+        *(f"volumes[{i}]" for i, volume in enumerate(task.volumes or []) if not str(volume).startswith("/")),
+        *(f"executors[{i}].workdir" for i, executor in enumerate(task.executors)
+          if executor.workdir is not None and not str(executor.workdir).startswith("/")),
+    ]
+
+
+def _fields_with_nul(value, field: str) -> List[str]:
+    if isinstance(value, (str, PurePath)):
+        return [field] if "\x00" in str(value) else []
+    if isinstance(value, dict):
+        # Named by the map (e.g. executors[0].env), not by key
+        return [field] if any("\x00" in key or _fields_with_nul(item, field) for key, item in value.items()) else []
+    if isinstance(value, list):
+        return [found for i, item in enumerate(value) for found in _fields_with_nul(item, f"{field}[{i}]")]
+    if isinstance(value, BaseModel):
+        return [found for name in value.__fields__
+                for found in _fields_with_nul(getattr(value, name), f"{field}.{name}" if field else name)]
+    return []
+
+
+def find_nul_fields(task: TesTask) -> List[str]:
+    """
+    Returns the fields (e.g. ``executors[0].env``) holding strings with NUL characters. The shells that read the
+    Pulsar job script drop them, so such values would not reach the container unchanged. ``inputs[].content`` is
+    uploaded to Pulsar as a file, not through the script, so NULs are allowed there.
+    """
+    return [field for field in _fields_with_nul(task, "")
+            if not (field.startswith("inputs[") and field.endswith("].content"))]
 
 
 ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

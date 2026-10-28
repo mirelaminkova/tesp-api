@@ -12,7 +12,8 @@ from tesp_api.api.error import api_handle_error, get_error_response_model, get_r
 from tesp_api.service.event_dispatcher import dispatch_event
 from tesp_api.repository.task_repository import task_repository
 from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog, \
-    find_unsupported_s3_urls, find_unsupported_outputs, find_invalid_container_fields
+    find_unsupported_s3_urls, find_unsupported_outputs, find_invalid_container_fields, \
+    find_relative_paths, find_nul_fields
 from tesp_api.utils.functional import maybe_of, identity_with_side_effect
 from tesp_api.api.model.task_service_info import TesServiceInfo, TesServiceType, TesServiceOrganization
 from tesp_api.api.model.response_models import \
@@ -65,6 +66,17 @@ async def create_task(
                     f"match [A-Za-z_][A-Za-z0-9_]*; images must be Docker references or docker://, library://, "
                     f"shub:// or oras:// URIs (not host paths, and not starting with '-'); input paths, volumes and "
                     f"the directories of output paths must not contain ':' or ','."))
+    relative_paths = find_relative_paths(tes_task)
+    if relative_paths:
+        return get_response_for_error_model(get_error_response_model(
+            HTTPStatus.BAD_REQUEST,
+            message=f"Invalid value in {', '.join(relative_paths)}: input paths, volumes and executor workdirs must "
+                    f"be absolute paths."))
+    nul_fields = find_nul_fields(tes_task)
+    if nul_fields:
+        return get_response_for_error_model(get_error_response_model(
+            HTTPStatus.BAD_REQUEST,
+            message=f"Invalid value in {', '.join(nul_fields)}: NUL characters are not allowed."))
     task_to_create = RegisteredTesTask(
         **tes_task.dict(),
         state=TesTaskState.QUEUED,
