@@ -134,6 +134,11 @@ class TesTaskExecutor(BaseModel):
         "HMMERDB": "/data/hmmer"
     }, description='Enviromental variables to set within the container. Example: { "env" : { "ENV_CONFIG_PATH" :'
                    ' "/data/config.file", "BLASTDB" : "/data/GRC38", "HMMERDB" : "/data/hmmer" } }')
+    ignore_error: bool = Field(None, example=False,
+                               description='Default behavior of running an array of executors is that execution'
+                                           ' stops on the first error. If `ignore_error` is `True`, then the'
+                                           ' runner will record error exit codes, but will continue on to the next'
+                                           ' tesExecutor.')
 
 
 class TesTaskExecutorLog(BaseModel):

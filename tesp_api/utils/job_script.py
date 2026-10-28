@@ -1,6 +1,6 @@
 import re
 from datetime import datetime, timezone
-from typing import List, Optional, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 # Marker files the job script writes into its working directory, the directory Pulsar's job script `cd`s into before
 # running the command line. Pulsar lists that directory in the completed job's status (`working_directory_contents`),
@@ -36,19 +36,22 @@ _EXECUTOR_END = (
 )
 
 
-def _executor(index: int, command: str) -> str:
+def _executor(index: int, command: str, ignore_error: bool) -> str:
     out, err = executor_file(index, "stdout"), executor_file(index, "stderr")
-    return f"{{ start=$(date +%s); ( {command} ) >{out} 2>{err}; tesp_executor_end {index}; }}"
+    # An ignored error is still in the executor's status file, so its log keeps the exit code.
+    end = f"tesp_executor_end {index}" + (" || :" if ignore_error else "")
+    return f"{{ start=$(date +%s); ( {command} ) >{out} 2>{err}; {end}; }}"
 
 
-def job_script(*commands: Optional[str]) -> Optional[str]:
+def job_script(*commands: Optional[str], ignore_errors: Sequence[bool] = ()) -> Optional[str]:
     """
     Joins the job's stage commands into the script submitted to Pulsar, or returns ``None`` when there is nothing to
     run. ``commands`` are the stage-in command, the executor commands in order, then the stage-out command; an empty
     one is skipped. The first failing stage ends the job with its exit code. A failing stage-in or stage-out also
     leaves a marker file (``STAGE_FAILED_FILES``), so the task can end in SYSTEM_ERROR rather than EXECUTOR_ERROR
     (issue #66, see ``failed_stage``). Each executor's streams and exit code go to files (``executor_file``); the
-    job's own stdout and stderr hold only the stage-in and stage-out output.
+    job's own stdout and stderr hold only the stage-in and stage-out output. ``ignore_errors[i]`` is executor ``i``'s
+    ``ignore_error`` (TES 1.1): when set, a failure of that executor does not stop the job (issue #23).
 
     The script runs in a subshell. Pulsar appends ``; return_code=$?; echo $return_code > <job dir>/return_code`` to
     the command line, in the same shell; an ``exit`` outside a subshell would end that shell before the exit code is
@@ -76,7 +79,8 @@ def job_script(*commands: Optional[str]) -> Optional[str]:
         script.append(stage(stage_in, "stage-in"))
     if executors:
         script.append(_EXECUTOR_END)
-        script.append(" && ".join(_executor(i, c) for i, c in executors) + " || exit $?")
+        script.append(" && ".join(_executor(i, c, i < len(ignore_errors) and bool(ignore_errors[i]))
+                                  for i, c in executors) + " || exit $?")
     if stage_out:
         script.append(stage(stage_out, "stage-out"))
     return "( " + "; ".join(script) + " )"

@@ -288,7 +288,8 @@ async def handle_run_task(event: Event) -> None:
             )
 
         # Single job script for Pulsar (untraced, see job_script)
-        run_command_str = job_script(stage_in_cmd, *container_cmds, stage_out_cmd)
+        run_command_str = job_script(stage_in_cmd, *container_cmds, stage_out_cmd,
+                                     ignore_errors=[bool(executor.ignore_error) for executor in task.executors])
 
         command_start_time = datetime.datetime.now(datetime.timezone.utc)
         command_status: dict
