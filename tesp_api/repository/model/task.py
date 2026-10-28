@@ -78,7 +78,8 @@ class TesTaskOutput(BaseModel):
                                          ' - file:///path/to/my/file')
 
     path: str = Field(..., description="Path of the file inside the container. Must be an absolute path.")
-    type: TesTaskIOType
+    # Optional since TES 1.1, like TesTaskInput.type
+    type: TesTaskIOType = TesTaskIOType.FILE
 
 
 class TesTaskResources(BaseModel):

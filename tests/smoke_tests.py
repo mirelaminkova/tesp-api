@@ -264,6 +264,21 @@ def test_stdout():
     assert _read_uploaded("stdout-test") == "hello-world-stdout\n"
     assert "hello-world-stdout" in _executor_logs(_gnv(task, "id"), "stdout")
 
+# TES 1.1: input and output `type` are optional and default to FILE.
+def test_io_type_defaults_to_file():
+    _remove_uploaded("type-default-test")
+    task = {
+        "inputs": [{"path": "/data/in.txt", "content": "type-default\n"}],
+        "outputs": [{"path": "/outputs/type-default-test", "url": "http://172.17.0.1:5000/upload"}],
+        "executors": [{"image": "ubuntu", "command": ["cp", "/data/in.txt", "/outputs/type-default-test"]}],
+    }
+    id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    _wait_for_state(id, "COMPLETE", 120)
+    assert _read_uploaded("type-default-test") == "type-default\n"
+    full = _get_request(f"/v1/tasks/{id}?view=FULL")
+    assert full["inputs"][0]["type"] == "FILE"
+    assert full["outputs"][0]["type"] == "FILE"
+
 # Executor.stderr is written to the given container path and is also reported in
 # ExecutorLog.stderr (view=FULL).
 def test_stderr():
