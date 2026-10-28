@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskIOType
-from tesp_api.utils.container import ContainerCommandBuilder, run_command, stage_in_command, stage_out_command, \
+from tesp_api.utils.container import MAX_REDIRECTS, ContainerCommandBuilder, run_command, stage_in_command, stage_out_command, \
     stage_out_script
 
 CONTAINER_TYPES = ["docker", "singularity"]
@@ -258,7 +258,8 @@ def test_stage_in_passes_url_intact(container_type, value, tmp_path):
 
     argv = _runtime_call(_run_with_stubs(command, tmp_path))["argv"]
     assert argv[-3:-1] == ["sh", "-c"]
-    assert shlex.split(argv[-1]) == ["curl", "-f", "-o", "input_file_0", url]
+    assert shlex.split(argv[-1]) == ["curl", "-fgL", "--max-redirs", str(MAX_REDIRECTS), "--proto-redir",
+                                     "=http,https", "-o", "input_file_0", url]
 
 
 @pytest.mark.parametrize("container_type", CONTAINER_TYPES)

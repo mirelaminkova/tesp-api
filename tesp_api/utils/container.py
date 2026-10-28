@@ -246,6 +246,21 @@ class ContainerCommandBuilder:
         return " && ".join([*mkdir_cmds, container_cmd])
 
 
+# Redirects followed when staging in an input (wget allows 20 by default, curl -L 50).
+MAX_REDIRECTS = 20
+
+
+def _file_download(url: str, filename: str) -> str:
+    """
+    ``curl`` command that downloads ``url`` to ``filename``. Redirects are followed (GitHub, Zenodo, DOIs and mirrors
+    redirect): without ``-L`` curl saves the 3xx body as the input and exits 0. A redirect may not leave HTTPS, so an
+    ``https://`` input is never fetched in the clear. ``-g`` keeps curl from expanding ``{a,b}`` and ``[1-2]``.
+    """
+    allowed = "=https" if urlparse(url).scheme.lower() == "https" else "=http,https"
+    return (f"curl -fgL --max-redirs {MAX_REDIRECTS} --proto-redir {allowed} "
+            f"-o {shlex.quote(filename)} {shlex.quote(url)}")
+
+
 # Unified command functions
 def stage_in_command(
     executor: TesTaskExecutor,
@@ -265,14 +280,14 @@ def stage_in_command(
         filename = os.path.basename(path)
         
         if input_type == TesTaskIOType.DIRECTORY:
-            # Recursive download
+            # Recursive download. wget follows redirects itself; without --span-hosts it recurses on the start host only.
             commands.append(
-                f"wget -e robots=off --mirror --no-parent --no-host-directories "
+                f"wget -e robots=off --mirror --no-parent --no-host-directories --max-redirect={MAX_REDIRECTS} "
                 f"--directory-prefix={shlex.quote(filename)} {shlex.quote(url)}"
             )
         else:
             # Single file download
-            commands.append(f"curl -f -o {shlex.quote(filename)} {shlex.quote(url)}")
+            commands.append(_file_download(url, filename))
     
     # Inline (content) inputs are uploaded to Pulsar directly, so there may be nothing to download
     if not commands:

@@ -36,7 +36,7 @@
       "command": [
         "sh",
         "-c",
-        "mkdir -p /data/results && cp /data/input_file.txt /data/output_file.txt && cp -r /data/input_dir/* /data/results/"
+        "grep -qx 'This is an input test file.' /data/input_file.txt && mkdir -p /data/results && cp /data/input_file.txt /data/output_file.txt && cp -r /data/input_dir/* /data/results/"
       ]
     }
   ]

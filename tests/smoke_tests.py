@@ -156,13 +156,23 @@ def test_get_task_list():
     assert tasks
     assert isinstance(tasks, list)
 
-# Tests only HTTP download for now and direct input.
+# HTTP download (content checked) and direct input.
 def test_inputs():
     assert _test_simple("inputs.json", 120)
 
 # Test directory as an input.
 def test_dir_input():
     assert _test_simple("dir-io.json", 120)
+
+# HTTP inputs behind redirects (issue #41): stage-in follows them and stores the target, not the redirect body.
+def test_http_input_redirect():
+    task = {
+        "inputs": [{"path": "/data/redirected",
+                    "url": "http://172.17.0.1:5000/redirect/redirect/test_data/test.txt", "type": "FILE"}],
+        "executors": [{"image": "ubuntu", "command": ["grep", "-qx", "this is a test file", "/data/redirected"]}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
 
 # FILE and DIRECTORY outputs uploaded over HTTP (multipart POST to tests/upload_server.py), plus missing outputs,
 # which are skipped: TES has no "optional" flag for outputs, and clients such as Nextflow check for missing files

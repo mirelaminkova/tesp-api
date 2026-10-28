@@ -2,7 +2,7 @@
     "inputs": [
         {
             "path":"/data/file_direct",
-            "content":"ls -la /data/file_direct && ls -la /data/file_http",
+            "content":"ls -la /data/file_direct && grep -qx 'this is a test file' /data/file_http",
             "type":"FILE"
         },
         {
