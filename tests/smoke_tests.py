@@ -200,6 +200,26 @@ def test_outputs():
     assert not os.path.exists(f"{uploaded}/outputs_http_missing.txt")
     _assert_skipped(task_id, ["/data/http_out/outputs_http_missing.txt", "/data/http_out/outputs_http_missing_dir"])
 
+# TES 1.1 wildcard outputs (issue #29): each match is uploaded with the path_prefix removed, here as the multipart
+# file name, which the upload server keeps below its upload root.
+def test_wildcard_outputs():
+    token = f"glob-{time.time_ns()}"
+    script = (f"mkdir -p /data/glob_out && echo a > /data/glob_out/a-{token}.bam"
+              f" && echo b > /data/glob_out/b-{token}.bam && echo c > /data/glob_out/c-{token}.txt")
+    task = {
+        "outputs": [{"path": f"/data/glob_out/*-{token}.bam", "path_prefix": "/data/",
+                     "url": "http://172.17.0.1:5000/upload", "type": "FILE"}],
+        "executors": [{"image": "ubuntu", "command": ["sh", "-c", script]}]
+    }
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "COMPLETE", 120)
+
+    uploaded = f"{script_directory}/uploaded_data/glob_out"
+    for name, content in ((f"a-{token}.bam", "a\n"), (f"b-{token}.bam", "b\n")):
+        with open(f"{uploaded}/{name}") as f:
+            assert f.read() == content, name
+    assert not os.path.exists(f"{uploaded}/c-{token}.txt")
+
 def _assert_skipped(task_id, paths):
     """The stage-out script reports each skipped output on a line of its own in the task's stderr."""
     task = _get_request(f"/v1/tasks/{task_id}?view=FULL")

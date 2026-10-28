@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple, Optional, Union
 from pymonad.maybe import Nothing, Maybe, Just
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskOutput, TesTaskIOType, \
-    is_valid_env_name, is_valid_image, is_valid_mount_path, has_registry_scheme
+    is_valid_env_name, is_valid_image, is_valid_mount_path, has_registry_scheme, has_wildcards
 from tesp_api.utils.resource_values import positive, ram_mib
 from tesp_api.utils.functional import get_else_throw, maybe_of
 
@@ -376,12 +376,15 @@ def _curl_quoted(value: str) -> str:
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
 
 
-# In the directory loop below: $f is ./<relative path>, $r the relative path, $q the relative path escaped for
-# curl -F (see _curl_quoted). The "_" keeps a trailing newline of a file name from being stripped by $(...).
-_DIRECTORY_LOOP = (
-    'for f; do r=${f#./}; q=$(printf "%s_" "$r" | sed \'s/[\\\\"]/\\\\&/g\'); q=${q%_}; '
-    '{upload} || exit 1; done'
-)
+# In the upload loops below: $f is the file, $r its relative path, $g and $q the file and the relative path escaped
+# for curl -F (see _curl_quoted). The "_" keeps a trailing newline of a file name from being stripped by $(...).
+def _escape(source: str, target: str) -> str:
+    """Shell commands that set ``$target`` to ``$source`` escaped for ``curl -F`` (see ``_curl_quoted``)."""
+    return f'{target}=$(printf "%s_" "${source}" | sed \'s/[\\\\"]/\\\\&/g\'); {target}=${{{target}%_}}; '
+
+
+# The directory loop runs in the output directory, so the relative path is also the file to send.
+_DIRECTORY_LOOP = 'for f; do r=${f#./}; ' + _escape("r", "q") + 'g=$q; {upload} || exit 1; done'
 # Files per upload loop. BusyBox find -exec ... + can build an argument list that is too long and then silently skips
 # files, so the batches are bounded with xargs.
 _DIRECTORY_BATCH = 100
@@ -398,7 +401,11 @@ def _file_upload(conf: dict, path: str) -> str:
     return f"curl -fsSg -X POST -F {shlex.quote('file=@' + _curl_quoted(path))} {url}"
 
 
-def _directory_upload(conf: dict, path: str) -> str:
+def _relative_upload(conf: dict) -> str:
+    """
+    Upload of the file ``$f`` at the relative path ``$r`` (``$g``, ``$q``: both escaped for ``curl -F``) of a DIRECTORY
+    or wildcard output: below the key prefix for S3, as the multipart file name for HTTP(S).
+    """
     url = shlex.quote(conf['url'])
     if conf.get('upload') == 's3_post':
         # --form-string sends values literally. S3 ignores fields after the file, so the file goes last.
@@ -408,12 +415,16 @@ def _directory_upload(conf: dict, path: str) -> str:
         upload = (
             "case \"$r\" in *'${filename}'*) "
             "echo \"tesp-api: cannot upload $r to S3: its name contains \\${filename}\" >&2; exit 1;; esac; "
-            f"curl -fsSg {' '.join(fields)} -F \"file=@\\\"$q\\\"\" {url}"
+            f"curl -fsSg {' '.join(fields)} -F \"file=@\\\"$g\\\"\" {url}"
         )
     else:
         # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
-        upload = f"curl -fsSg -X POST -F \"file=@\\\"$q\\\";filename=\\\"$q\\\"\" {url}"
-    loop = _DIRECTORY_LOOP.replace("{upload}", upload)
+        upload = f"curl -fsSg -X POST -F \"file=@\\\"$g\\\";filename=\\\"$q\\\"\" {url}"
+    return upload
+
+
+def _directory_upload(conf: dict, path: str) -> str:
+    loop = _DIRECTORY_LOOP.replace("{upload}", _relative_upload(conf))
     # Symbolic links are not followed, as they could point outside the directory or form loops; each is reported.
     # The status of find is lost in the pipe, so a first find pass fails the upload on e.g. unreadable directories.
     # xargs fails if an upload fails.
@@ -421,6 +432,33 @@ def _directory_upload(conf: dict, path: str) -> str:
     return (
         f"( cd {shlex.quote(path)} && find . -type l -exec sh -c {skipped_link} {shlex.quote(path)} {{}} \\; && "
         f"find . -type f -print0 | xargs -0 -n {_DIRECTORY_BATCH} sh -c {shlex.quote(loop)} sh )"
+    )
+
+
+def _glob(path: str) -> str:
+    """``path`` as a shell glob: ``*`` and ``?`` in its last component unquoted, everything else quoted."""
+    directory, name = os.path.split(path)
+    parts = [part if part in ("*", "?") else shlex.quote(part) for part in re.split(r"([*?])", name) if part]
+    return shlex.quote(directory.rstrip("/") + "/") + "".join(parts)
+
+
+def _wildcard_upload(conf: dict, path: str) -> str:
+    """
+    Uploads each regular file matching the wildcard ``path`` (TES 1.1) at its path without ``path_prefix``. As in the
+    shell, ``*`` does not match a leading ``.``. Symbolic links and directories are skipped with a message; a pattern
+    that matches no file is skipped like a missing output.
+    """
+    if conf.get('upload') == 's3_put':
+        raise ValueError("wildcard outputs to S3 need a presigned POST policy for the URL prefix")
+    skipped = shlex.quote(f"tesp-api: output {path} matched no files, skipped")
+    # Without a match the shell leaves the pattern itself in the loop, which [ -f ] then skips.
+    return (
+        f"( p={shlex.quote(conf['path_prefix'])}; m=0; for f in {_glob(path)}; do "
+        'if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then '
+        'echo "tesp-api: $f is not a regular file, skipped" >&2; continue; fi; '
+        '[ -f "$f" ] || continue; m=1; r=${f#"$p"}; r=${r#/}; ' + _escape("f", "g") + _escape("r", "q") +
+        f"{_relative_upload(conf)} || exit 1; done; "
+        f"[ $m = 1 ] || echo {skipped} >&2 )"
     )
 
 
@@ -436,6 +474,9 @@ def stage_out_script(output_confs: List[dict]) -> str:
     commands = []
     for conf in output_confs:
         path = conf['container_path']
+        if conf.get('path_prefix') and has_wildcards(path):
+            commands.append(_wildcard_upload(conf, path))
+            continue
         if conf.get('type', TesTaskIOType.FILE) == TesTaskIOType.DIRECTORY:
             upload = _directory_upload(conf, path)
         else:
@@ -466,7 +507,8 @@ def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):
             'container_path': output.path,
             'url': output.url,
             'volume_name': volume_name,
-            'type': output.type
+            'type': output.type,
+            'path_prefix': output.path_prefix
         })
 
     for v in volumes:

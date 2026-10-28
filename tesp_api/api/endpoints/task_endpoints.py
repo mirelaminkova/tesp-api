@@ -56,7 +56,8 @@ async def create_task(
         return get_response_for_error_model(get_error_response_model(
             HTTPStatus.BAD_REQUEST,
             message=f"Unsupported output in {', '.join(unsupported_outputs)}: output paths must be absolute; "
-                    f"wildcards (*, ?) are not supported."))
+                    f"wildcards (*, ?) are supported in the last path component of FILE outputs only, with a "
+                    f"path_prefix that the path's directory starts with, and not yet for s3:// URLs."))
     invalid_container_fields = find_invalid_container_fields(tes_task)
     if invalid_container_fields:
         return get_response_for_error_model(get_error_response_model(

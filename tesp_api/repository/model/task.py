@@ -2,7 +2,7 @@ import os
 import re
 from datetime import datetime
 from enum import Enum
-from typing import List, Dict, Union
+from typing import List, Dict, Optional, Union
 from pathlib import Path
 from bson.objectid import ObjectId
 from pydantic import BaseModel, Field
@@ -77,7 +77,10 @@ class TesTaskOutput(BaseModel):
                                          ' - gs://my-bucket/file2'
                                          ' - file:///path/to/my/file')
 
-    path: str = Field(..., description="Path of the file inside the container. Must be an absolute path.")
+    path: str = Field(..., description="Path of the file inside the container. Must be an absolute path. May contain"
+                                       " the POSIX wildcards * and ? in its last component (TES 1.1).")
+    path_prefix: str = Field(None, description="Prefix removed from each file matching a path with wildcards; the"
+                                               " rest is appended to url. Required for such paths, ignored otherwise.")
     type: TesTaskIOType
 
 
@@ -261,18 +264,48 @@ def find_unsupported_s3_urls(task: TesTask) -> List[str]:
     ]
 
 
+OUTPUT_WILDCARDS = "*?"
+
+
+def has_wildcards(path: str) -> bool:
+    """``*`` and ``?`` are wildcards in output paths; ``[`` is not, as it is common in file names."""
+    return any(c in path for c in OUTPUT_WILDCARDS)
+
+
 def find_unsupported_outputs(task: TesTask) -> List[str]:
     """
-    Returns the fields of outputs that cannot be uploaded: paths that are not absolute or contain the wildcards ``*``
-    or ``?`` (TES 1.1 ``path_prefix`` outputs, not supported yet). Without this check such an output would be skipped
-    as missing. ``[`` is allowed, as it is common in file names; ``path_prefix`` is ignored, as TES 1.1 says for paths
-    without wildcards.
+    Returns the fields of outputs that cannot be uploaded: paths that are not absolute, and TES 1.1 wildcard outputs
+    that tesp-api does not support (see ``unsupported_wildcard_output_field``). Without this check such an output
+    would be skipped as missing. ``path_prefix`` is ignored for paths without wildcards, as TES 1.1 says.
     """
-    return [
-        f"outputs[{i}].path"
-        for i, output in enumerate(task.outputs or [])
-        if not output.path.startswith("/") or any(c in output.path for c in "*?")
-    ]
+    unsupported = []
+    for i, output in enumerate(task.outputs or []):
+        if not output.path.startswith("/"):
+            unsupported.append(f"outputs[{i}].path")
+        elif has_wildcards(output.path):
+            field = unsupported_wildcard_output_field(output)
+            if field:
+                unsupported.append(f"outputs[{i}].{field}")
+    return unsupported
+
+
+def unsupported_wildcard_output_field(output: TesTaskOutput) -> Optional[str]:
+    """
+    For an output whose path has wildcards, the field that keeps it from being uploaded, if any: wildcards are
+    supported in the last path component only, for FILE outputs, with a ``path_prefix`` that the path's directory
+    starts with (so each match keeps a file name after the prefix is removed). S3 URLs are not supported yet, as
+    they need a presigned POST policy for the URL prefix.
+    """
+    if has_wildcards(os.path.dirname(output.path)):
+        return "path"
+    if output.type == TesTaskIOType.DIRECTORY:
+        return "type"
+    prefix = output.path_prefix
+    if not prefix or has_wildcards(prefix) or not (os.path.dirname(output.path).rstrip("/") + "/").startswith(prefix):
+        return "path_prefix"
+    if isinstance(output.url, S3Url):
+        return "url"
+    return None
 
 
 ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
