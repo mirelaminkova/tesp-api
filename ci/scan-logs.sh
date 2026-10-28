@@ -14,8 +14,10 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
-# Raw or URL-encoded (%27policy%3D...); tesp-test-secret is TESP_API_S3__SECRET_ACCESS_KEY in docker-compose.yaml.
-pattern='x-amz-signature|x-amz-credential|x-amz-security-token|awsaccesskeyid|(^|[^[:alnum:]_-]|%[0-9a-f]{2})policy(=|%3d)|tesp-test-secret'
+# Raw or URL-encoded once or more (%27policy%3D..., %2527policy%253D...), and JSON or dict reprs ("policy": ...);
+# tesp-test-secret is TESP_API_S3__SECRET_ACCESS_KEY in docker-compose.yaml. The SigV2 Signature always comes with
+# AWSAccessKeyId.
+pattern='x-amz-signature|x-amz-credential|x-amz-security-token|awsaccesskeyid|(^|[^[:alnum:]_-]|%(25)*[0-9a-f]{2})policy(['"'"'"]?[[:space:]]*[:=]|(%(25)*2[27])?(\+|%(25)*20)*%(25)*3[ad])|tesp-test-secret'
 
 leak=false
 unreadable=false

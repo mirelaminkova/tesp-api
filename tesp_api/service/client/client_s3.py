@@ -17,17 +17,24 @@ from tesp_api.utils.types import S3Url
 ADDRESSING_STYLES = {'path', 'virtual', 'auto'}
 MAX_PRESIGN_EXPIRY_SECONDS = 7 * 24 * 3600  # SigV4 limit
 
-# Query parameters of presigned URLs and form fields of presigned POSTs (lower case), e.g. `x-amz-signature=...`.
-# The POST policy is redacted too: it contains the x-amz-credential condition, i.e. the access key id.
-_SECRET_NAME = r'(?i:X-Amz-(?:Credential|Signature|Security-Token)|policy)'
+# Query parameters of presigned URLs and form fields of presigned POSTs, e.g. `X-Amz-Signature=...`, SigV4 and SigV2
+# (`AWSAccessKeyId`, `Signature`). The POST policy is redacted too: it contains the credential condition, i.e. the
+# access key id. Names are matched in any case.
+_SECRET_NAME = r'(?:X-Amz-(?:Credential|Signature|Security-Token)|AWSAccessKeyId|Signature|policy)'
+# `%` of a character URL-encoded once or more (`%3D`, `%253D`, ...).
+_PCT = r'%(?:25)*'
 _PRESIGNED_SECRET_PARAMS = re.compile(rf'''
-    # Raw: the value ends at `&`, white space or a quote.
-    (?<![\w-]){_SECRET_NAME}=[^&\s'"]+
-    # URL-encoded once, as aiohttp sends the job command line to Pulsar (`command_line=...%26X-Amz-Signature%3D...`).
-    # The name may follow an encoded character (`%26`, `%27`); the value also ends at `+` (an encoded space) and at
-    # an encoded space, `"`, `&` or `'` (`%20`, `%22`, `%26`, `%27`). Base64 `+`, `/`, `=` are `%2B`, `/`, `%3D`.
-    | (?:(?<![\w-])|(?<=%[0-9A-Fa-f]{{2}})){_SECRET_NAME}%3[Dd](?:(?!%2[0267])[^&\s'"+])+
-''', re.VERBOSE)
+    # Raw: `name=value`, or `"name": "value"` as in JSON and dict reprs (issue #48). The value ends at `&`, white
+    # space, a quote, `,` or `}}`.
+    (?<![\w-]){_SECRET_NAME}['"]?[ \t]*[:=][ \t]*['"]?[^&\s'",}}]+
+    # URL-encoded, once as aiohttp sends the job command line to Pulsar (`command_line=...%26X-Amz-Signature%3D...`)
+    # or more. The name may follow an encoded character (`%26`, `%27`, `%2526`); `=` is `%3D`, `:` is `%3A` or kept
+    # as is, a space is `+` or `%20`. The value ends at `+` and at an encoded space, `"`, `&`, `'`, `,` or `}}`.
+    # Base64 `+`, `/`, `=` are `%2B`, `/`, `%3D`.
+    | (?:(?<![\w-])|(?<=%[0-9A-F]{{2}})|(?<=%25[0-9A-F]{{2}}))
+      {_SECRET_NAME}(?:{_PCT}2[27])?(?:\+|{_PCT}20)*(?:{_PCT}3[AD]|:)(?:\+|{_PCT}20)*(?:{_PCT}2[27])?
+      (?:(?!{_PCT}(?:2[0267C]|7D))[^&\s'"+,}}])+
+''', re.VERBOSE | re.IGNORECASE)
 
 
 @dataclass(frozen=True)
