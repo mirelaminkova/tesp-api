@@ -407,8 +407,9 @@ from tesp_api.repository.model.task import find_unsupported_outputs  # noqa: E40
 
 
 @pytest.mark.parametrize("output, field", [
-    ({"path": "/data/*.bam", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
-    ({"path": "/data/sample?.txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
+    # TES 1.1: a path with wildcards needs a path_prefix (issue #29).
+    ({"path": "/data/*.bam", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path_prefix"),
+    ({"path": "/data/sample?.txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path_prefix"),
     ({"path": "data/out.txt", "url": UPLOAD_URL, "type": "FILE"}, "outputs[0].path"),
 ])
 def test_unsupported_output_paths_are_reported(output, field):
@@ -518,3 +519,127 @@ def test_s3_directory_file_named_like_the_filename_variable_fails(fake_curl, tmp
     assert result.returncode != 0
     assert calls == []
     assert "tesp-api: cannot upload a${filename} to S3: its name contains ${filename}" in result.stderr.splitlines()
+
+
+# --- wildcard outputs with path_prefix (TES 1.1, issue #29) ----------------------
+
+from tesp_api.utils.container import map_volumes  # noqa: E402
+
+
+@pytest.mark.parametrize("output, field", [
+    ({"path": "/data/*.bam", "path_prefix": "/other/"}, "path_prefix"),
+    # The prefix must end before the file name, so each match keeps a name after it is removed.
+    ({"path": "/data/sa*.bam", "path_prefix": "/data/sa"}, "path_prefix"),
+    ({"path": "/data/*.bam", "path_prefix": "/da*"}, "path_prefix"),
+    ({"path": "/data/*/x.bam", "path_prefix": "/data/"}, "path"),
+    ({"path": "/data/*.bam", "path_prefix": "/data/", "type": "DIRECTORY"}, "type"),
+    # S3 needs a presigned POST policy for the URL prefix; not supported yet.
+    ({"path": "/data/*.bam", "path_prefix": "/data/", "url": "s3://bucket/out/"}, "url"),
+])
+def test_unsupported_wildcard_outputs_are_reported(output, field):
+    output = {"url": UPLOAD_URL, "type": "FILE", **output}
+    assert find_unsupported_outputs(_task([output])) == [f"outputs[0].{field}"]
+
+
+@pytest.mark.parametrize("path, prefix", [
+    ("/data/*.bam", "/data/"), ("/data/*.bam", "/data"), ("/data/*.bam", "/"), ("/data/out/s?_*", "/data/"),
+    ("/*.bam", "/"),
+])
+def test_wildcard_outputs_with_path_prefix_are_supported(path, prefix):
+    for url in (UPLOAD_URL, "https://example.org/upload"):
+        assert find_unsupported_outputs(_task([{"path": path, "path_prefix": prefix, "url": url,
+                                                "type": "FILE"}])) == []
+
+
+def test_map_volumes_keeps_path_prefix():
+    task = _task([{"path": "/data/out/*.bam", "path_prefix": "/data/", "url": UPLOAD_URL, "type": "FILE"}])
+    output_confs, volume_confs = map_volumes("job", [], task.outputs)
+    assert output_confs[0]["path_prefix"] == "/data/"
+    assert [v["container_path"] for v in volume_confs] == ["/data/out"]
+
+
+@pytest.fixture
+def bam_dir(tmp_path):
+    data = tmp_path / "data"
+    (data / "dir.bam").mkdir(parents=True)
+    for name in ("a.bam", "b c.bam", 'x;"q" \\$(touch pwned).bam', ".hidden.bam", "other.txt", "[1]a.bam", "1a.bam"):
+        (data / name).write_text(name + "\n")
+    (data / "link.bam").symlink_to(data / "a.bam")
+    return data
+
+
+def _wildcard_conf(path, prefix, url=UPLOAD_URL):
+    return {**_output_conf(url, path), "path_prefix": prefix}
+
+
+def _posted(calls) -> dict:
+    """Multipart file name to content for each call."""
+    posted = {}
+    for call in calls:
+        [form] = _form(call)
+        path, rest = _curl_unquote(form[len("file=@"):])
+        name, _ = _curl_unquote(rest[len(";filename="):])
+        posted[name] = call["files"][path]
+    return posted
+
+
+def test_wildcard_output_posts_matches_without_the_prefix(fake_curl, bam_dir, tmp_path):
+    result, calls = fake_curl([_wildcard_conf(f"{bam_dir}/*.bam", f"{bam_dir}/")])
+    assert result.returncode == 0, result.stderr
+    names = ["a.bam", "b c.bam", 'x;"q" \\$(touch pwned).bam', "[1]a.bam", "1a.bam"]
+    assert _posted(calls) == {name: name + "\n" for name in names}
+    assert all(call["args"][-1] == UPLOAD_URL for call in calls)
+    # Symbolic links and directories are skipped with a message; dot files do not match *.
+    assert f"tesp-api: {bam_dir}/link.bam is not a regular file, skipped" in result.stderr.splitlines()
+    assert f"tesp-api: {bam_dir}/dir.bam is not a regular file, skipped" in result.stderr.splitlines()
+    assert not (tmp_path / "pwned").exists() and not (bam_dir / "pwned").exists()
+
+
+def test_wildcard_output_keeps_the_path_after_a_shorter_prefix(fake_curl, bam_dir, tmp_path):
+    result, calls = fake_curl([_wildcard_conf(f"{bam_dir}/?.bam", str(tmp_path))])
+    assert result.returncode == 0, result.stderr
+    assert _posted(calls) == {"data/a.bam": "a.bam\n"}
+
+
+def test_brackets_in_wildcard_paths_are_literal(fake_curl, bam_dir):
+    result, calls = fake_curl([_wildcard_conf(f"{bam_dir}/[1]*.bam", f"{bam_dir}/")])
+    assert result.returncode == 0, result.stderr
+    assert list(_posted(calls)) == ["[1]a.bam"]
+
+
+def test_wildcard_output_without_matches_is_skipped(fake_curl, bam_dir):
+    path = f"{bam_dir}/*.cram"
+    result, calls = fake_curl([_wildcard_conf(path, f"{bam_dir}/"), _output_conf(UPLOAD_URL, f"{bam_dir}/other.txt")])
+    assert result.returncode == 0, result.stderr
+    assert len(calls) == 1
+    assert f"tesp-api: output {path} matched no files, skipped" in result.stderr.splitlines()
+
+
+def test_failed_wildcard_upload_fails_the_stage_out(fake_curl, bam_dir):
+    result, _ = fake_curl([_wildcard_conf(f"{bam_dir}/*.bam", f"{bam_dir}/")], exit_code=22)
+    assert result.returncode != 0
+
+
+def test_wildcard_output_with_s3_post_policy_uses_the_key_prefix(fake_curl, bam_dir):
+    # The stage-out side of S3 wildcard outputs: the same presigned POST contract as DIRECTORY outputs.
+    conf = {**_wildcard_conf(f"{bam_dir}/?.bam", f"{bam_dir}/", "https://s3.example.org/my-bucket"),
+            "upload": "s3_post", "key_prefix": "work/out/", "form_fields": {"policy": "p"}}
+    result, calls = fake_curl([conf])
+    assert result.returncode == 0, result.stderr
+    [call] = calls
+    fields = dict(a.split("=", 1) for i, a in enumerate(call["args"]) if call["args"][i - 1] == "--form-string")
+    assert fields == {"key": "work/out/a.bam", "policy": "p"}
+
+
+def test_wildcard_output_with_presigned_put_is_refused():
+    conf = {**_wildcard_conf("/data/*.bam", "/data/", "https://s3.example.org/b/k?X-Amz-Signature=x"),
+            "upload": "s3_put"}
+    with pytest.raises(ValueError):
+        stage_out_script([conf])
+
+
+def test_path_prefix_is_ignored_without_wildcards(fake_curl, bam_dir):
+    path = f"{bam_dir}/a.bam"
+    result, calls = fake_curl([_wildcard_conf(path, "/elsewhere/")])
+    assert result.returncode == 0, result.stderr
+    assert calls[0]["files"] == {path: "a.bam\n"}
