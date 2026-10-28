@@ -234,12 +234,11 @@ def test_outputs():
     _assert_skipped(task_id, ["/data/http_out/outputs_http_missing.txt", "/data/http_out/outputs_http_missing_dir"])
 
 def _assert_skipped(task_id, paths):
-    """The stage-out script reports each skipped output on a line of its own in the task's stderr."""
+    """The stage-out script reports each skipped output, which ends up in the task's system logs (issue #67)."""
     task = _get_request(f"/v1/tasks/{task_id}?view=FULL")
-    stderr_lines = [line for log in task["logs"] for executor_log in log["logs"]
-                    for line in (executor_log.get("stderr") or "").splitlines()]
+    system_logs = [line for log in task["logs"] for line in log.get("system_logs") or []]
     for path in paths:
-        assert f"tesp-api: output {path} not found, skipped" in stderr_lines, path
+        assert f"tesp-api: output {path} not found, skipped" in system_logs, path
 
 # Downloads and copies file to the shared volume and displays its content with two separate executors.
 def test_volumes():
