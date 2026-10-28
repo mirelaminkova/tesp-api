@@ -5,12 +5,10 @@ from typing import List, Optional
 from urllib.parse import urlsplit
 
 import botocore.session
-from aiobotocore.session import get_session
 from botocore import UNSIGNED
 from botocore.config import Config
 
 from tesp_api.config.properties import properties
-from tesp_api.service.client.client import Client
 from tesp_api.repository.model.task import TesTaskIOType
 from tesp_api.utils.types import S3Url
 
@@ -201,19 +199,3 @@ def redact_presigned_urls(text: str) -> str:
     """
     return _PRESIGNED_SECRET_PARAMS.sub('REDACTED', text)
 
-
-# TODO: Error handling, maybe_of
-class ClientS3(Client):
-
-    @staticmethod
-    async def download_file(s3_url: S3Url):
-        _require_plain(s3_url)
-        async with get_session().create_client('s3', **_client_args(get_s3_config())) as client:
-            async with (await client.get_object(Bucket=s3_url.bucket, Key=s3_url.key))['Body'] as stream:
-                return await stream.read()
-
-    @staticmethod
-    async def upload_file(s3_url: S3Url, file_content: bytes):
-        _require_plain(s3_url)
-        async with get_session().create_client('s3', **_client_args(get_s3_config())) as client:
-            await client.put_object(Bucket=s3_url.bucket, Key=s3_url.key, Body=file_content)

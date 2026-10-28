@@ -3,16 +3,17 @@ version: '3.8'
 services:
 
   service-s3:
-    image: minio/minio
+    # minio/minio is no longer published on Docker Hub; this is Bitnami's frozen MinIO build (as in ../../docker-compose.yaml).
+    # It starts the server with the console on :9001 itself and keeps its data in /bitnami/minio/data.
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - ./s3/data:/data
+      - ./s3/data:/bitnami/minio/data
     environment:
       MINIO_ROOT_USER: root
       MINIO_ROOT_PASSWORD: 123456789
-    command: server --console-address ":9001" /data
 
   service-ftp:
     build:
