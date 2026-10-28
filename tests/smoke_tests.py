@@ -139,6 +139,14 @@ def test_submit_task_complete():
 def test_submit_task_fail():
     assert _test_activity("state_false.json", 10, 60, 'EXECUTOR_ERROR')
 
+# Issue #64: a failing last stage (here the only executor, no outputs) keeps its exit code.
+def test_failing_last_executor_keeps_exit_code():
+    task = {"executors": [{"image": "ubuntu", "command": ["sh", "-c", "echo before-fail; exit 3"]}]}
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "EXECUTOR_ERROR", 120)
+    full = _get_request(f"/v1/tasks/{task_id}?view=FULL")
+    assert [log.get("exit_code") for log in full["logs"][-1]["logs"]] == [3]
+
 # Submits multiple tasks with expected state: COMPLETE.
 def test_submit_task_multi_complete():
     assert _test_activity("multi_true.json", 10, 60, 'COMPLETE')
