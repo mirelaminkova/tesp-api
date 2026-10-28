@@ -1,6 +1,6 @@
 import os
 import sys
-from flask import Flask, request, jsonify, send_from_directory, abort
+from flask import Flask, request, jsonify, send_from_directory, abort, redirect
 from werkzeug.utils import secure_filename
 
 HOME_DIR = sys.path[0]  # resolves to /home/debian
@@ -9,7 +9,7 @@ SERVE_ROOT = HOME_DIR
 
 app = Flask(__name__)
 # Serve /dir and /dir/file without redirecting to a trailing-slash URL: Werkzeug would otherwise answer every GET
-# without a trailing slash with a 308 to the /<path:subpath>/ rule, and stage-in curl does not follow redirects.
+# without a trailing slash with a 308 to the /<path:subpath>/ rule.
 app.url_map.strict_slashes = False
 
 # Handle file upload
@@ -30,6 +30,11 @@ def upload():
     uploaded_file.save(safe_path)
 
     return jsonify({"status": "ok", "saved_as": safe_path})
+
+# /redirect/<path> answers 302 to /<path>; nest it to chain redirects (issue #41).
+@app.route('/redirect/<path:subpath>', methods=['GET'])
+def redirect_to(subpath):
+    return redirect(f"/{subpath}", code=302)
 
 @app.route('/<path:subpath>', methods=['GET'])
 @app.route('/<path:subpath>/', methods=['GET'])
