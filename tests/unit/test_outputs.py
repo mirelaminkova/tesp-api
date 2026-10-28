@@ -5,10 +5,12 @@ import inspect
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
-from urllib.parse import parse_qs, urlsplit
+import threading
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pydantic
 import pytest
@@ -518,3 +520,82 @@ def test_s3_directory_file_named_like_the_filename_variable_fails(fake_curl, tmp
     assert result.returncode != 0
     assert calls == []
     assert "tesp-api: cannot upload a${filename} to S3: its name contains ${filename}" in result.stderr.splitlines()
+
+
+# --- FTP outputs (issue #35) ---------------------------------------------------
+# They were sent as an HTTP multipart POST, which an FTP server cannot take; now curl -T (STOR).
+
+FTP_URL = "ftp://user:pw@ftp.example.org:2121/store/results"
+
+
+def test_ftp_file_output_is_stored(fake_curl, outputs_dir):
+    path = str(outputs_dir / "out file.txt")
+    url = "ftp://ftp.example.org:2121/store/out-1"
+    result, calls = fake_curl([_output_conf(url, path)])
+    assert result.returncode == 0, result.stderr
+    assert [call["args"] for call in calls] == [["-fsSg", "--ftp-create-dirs", "-T", path, url]]
+    assert calls[0]["files"] == {path: "single\n"}
+
+
+def test_ftp_directory_output_stores_each_file_below_the_url(fake_curl, outputs_dir):
+    path = str(outputs_dir / "results")
+    (outputs_dir / "results" / "sub dir" / "#1?%20 ü.txt").write_text("odd\n")
+    for url in (FTP_URL, FTP_URL + "/"):
+        result, calls = fake_curl([_output_conf(url, path, TesTaskIOType.DIRECTORY)])
+        assert result.returncode == 0, result.stderr
+        stored = {}
+        for call in calls:
+            args = call["args"]
+            assert args[:3] == ["-fsSg", "--ftp-create-dirs", "-T"] and len(args) == 5
+            target = args[4]
+            assert target.startswith(FTP_URL + "/")
+            encoded = target[len(FTP_URL) + 1:]
+            # Every byte but / is encoded, so no character of a name can end the path or start a query.
+            assert all(part == "" or part.startswith("%") for part in encoded.split("/"))
+            assert args[3].startswith("./")  # find runs in the output directory
+            relative = args[3][2:]
+            assert unquote(encoded, errors="strict") == relative
+            stored[relative] = call["files"][args[3]]
+        assert stored == {"top.txt": "top\n", "sub dir/it's nested.txt": "nested\n",
+                          'a;type=x,y "q" \\b.txt': "special\n", "sub dir/#1?%20 ü.txt": "odd\n"}
+
+
+def test_ftp_directory_upload_failure_fails_the_stage_out(fake_curl, outputs_dir):
+    result, _ = fake_curl([_output_conf(FTP_URL, str(outputs_dir / "results"), TesTaskIOType.DIRECTORY)],
+                          exit_code=25)
+    assert result.returncode != 0
+
+
+try:
+    from pyftpdlib.authorizers import DummyAuthorizer
+    from pyftpdlib.handlers import FTPHandler
+    from pyftpdlib.servers import ThreadedFTPServer
+except ImportError:  # not a CI dependency; the round trip runs where it is installed
+    ThreadedFTPServer = None
+
+
+@pytest.mark.skipif(ThreadedFTPServer is None or shutil.which("curl") is None, reason="needs pyftpdlib and curl")
+def test_ftp_outputs_round_trip(outputs_dir, tmp_path):
+    root = tmp_path / "ftp"
+    root.mkdir()
+    authorizer = DummyAuthorizer()
+    authorizer.add_user("user", "pw", str(root), perm="elradfmw")
+    handler = type("Handler", (FTPHandler,), {"authorizer": authorizer})
+    (outputs_dir / "results" / "sub dir" / "#1?%20 ü.txt").write_text("odd\n")
+    server = ThreadedFTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"timeout": 0.1}, daemon=True)
+    thread.start()
+    try:
+        base = f"ftp://user:pw@127.0.0.1:{server.address[1]}"
+        script = stage_out_script([
+            _output_conf(f"{base}/new/dir/single.txt", str(outputs_dir / "out file.txt")),
+            _output_conf(f"{base}/results", str(outputs_dir / "results"), TesTaskIOType.DIRECTORY)])
+        result = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    finally:
+        server.close_all()
+    assert result.returncode == 0, result.stderr
+    assert (root / "new" / "dir" / "single.txt").read_text() == "single\n"
+    assert (root / "results" / "top.txt").read_text() == "top\n"
+    assert (root / "results" / "sub dir" / "it's nested.txt").read_text() == "nested\n"
+    assert (root / "results" / 'a;type=x,y "q" \\b.txt').read_text() == "special\n"
+    assert (root / "results" / "sub dir" / "#1?%20 ü.txt").read_text() == "odd\n"

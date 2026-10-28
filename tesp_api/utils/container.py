@@ -390,10 +390,17 @@ _DIRECTORY_BATCH = 100
 # All curl calls use -g (--globoff): curl would otherwise expand {a,b} and [1-2] in task-provided URLs.
 
 
+def _is_ftp(conf: dict) -> bool:
+    return urlparse(str(conf['url'])).scheme.lower() == 'ftp'
+
+
 def _file_upload(conf: dict, path: str) -> str:
     url = shlex.quote(conf['url'])
     if conf.get('upload') == 's3_put':
         return f"curl -fsSg -T {shlex.quote(path)} {url}"
+    if _is_ftp(conf):
+        # FTP STOR; missing directories in the URL path are created. A URL ending in / gets the file's base name.
+        return f"curl -fsSg --ftp-create-dirs -T {shlex.quote(path)} {url}"
     # Multipart POST; the file name sent is the base name of the path.
     return f"curl -fsSg -X POST -F {shlex.quote('file=@' + _curl_quoted(path))} {url}"
 
@@ -409,6 +416,14 @@ def _directory_upload(conf: dict, path: str) -> str:
             "case \"$r\" in *'${filename}'*) "
             "echo \"tesp-api: cannot upload $r to S3: its name contains \\${filename}\" >&2; exit 1;; esac; "
             f"curl -fsSg {' '.join(fields)} -F \"file=@\\\"$q\\\"\" {url}"
+        )
+    elif _is_ftp(conf):
+        # FTP STOR of each file below the URL, creating directories. Every byte of the relative path but / is
+        # percent-encoded (curl decodes each path segment), so spaces, # or ? in names cannot change the URL.
+        base = shlex.quote(str(conf['url']).rstrip('/') + '/')
+        upload = (
+            "e=$(printf \"%s\" \"$r\" | od -An -tx1 -v | tr -d \" \\n\" | sed \"s/../%&/g; s|%2f|/|g\"); "
+            f"curl -fsSg --ftp-create-dirs -T \"$f\" {base}\"$e\""
         )
     else:
         # Multipart POST; the file name sent is the path relative to the directory, which keeps its structure.
@@ -427,7 +442,7 @@ def _directory_upload(conf: dict, path: str) -> str:
 def stage_out_script(output_confs: List[dict]) -> str:
     """
     Shell script that uploads the outputs, run in the stage-out container after the executors. HTTP(S) outputs are
-    sent as multipart ``POST`` (form field ``file``), S3 outputs (see ``presign_s3_outputs``) with a presigned ``PUT``
+    sent as multipart ``POST`` (form field ``file``), FTP outputs with ``STOR`` (``curl -T``), S3 outputs (see ``presign_s3_outputs``) with a presigned ``PUT``
     (FILE) or presigned POST policy (DIRECTORY). DIRECTORY outputs upload every file below the directory, keeping
     their relative paths. Outputs whose path does not exist are skipped with a message on stderr: TES has no notion of
     optional outputs, and clients such as Nextflow check for missing outputs themselves. A failed upload fails the
