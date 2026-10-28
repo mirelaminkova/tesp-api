@@ -211,9 +211,9 @@ async def read_executor_logs(pulsar_operations: PulsarOperations, job_id: str, s
 @local_handler.register(event_name="run_task")
 async def handle_run_task(event: Event) -> None:
     """
-    Updates task state to RUNNING, prepares and executes job commands in Pulsar,
-    waits for completion, logs results, and updates task state accordingly (COMPLETE, EXECUTOR_ERROR, or
-    SYSTEM_ERROR when staging or the submission failed).
+    Prepares and submits the job to Pulsar, sets the task RUNNING once Pulsar reports the job has left the batch
+    system's queue, waits for completion, logs results, and updates task state accordingly (COMPLETE, EXECUTOR_ERROR,
+    or SYSTEM_ERROR when staging or the submission failed).
     Handles cancellations and other exceptions during its lifecycle.
     """
     event_name, payload = event
@@ -228,29 +228,38 @@ async def handle_run_task(event: Event) -> None:
     run_command_str = None
     command_start_time = datetime.datetime.now(datetime.timezone.utc)
 
-    try:
-        logger.info(f"Running task: {task_id}")
-        # Set task state to RUNNING
-        task_monad_init = await task_repository.update_task_state(
+    async def mark_running() -> None:
+        # The task stays INITIALIZING while its job waits in the batch system's queue (issue #65).
+        nonlocal command_start_time
+        command_start_time = datetime.datetime.now(datetime.timezone.utc)
+        task_monad_running = await task_repository.update_task_state(
             task_id,
             TesTaskState.INITIALIZING,
             TesTaskState.RUNNING
         )
-        task = get_else_throw(task_monad_init, TaskNotFoundError(task_id, Just(TesTaskState.INITIALIZING)))
-
-        # Early check for cancellation
-        current_task_after_init_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
-        current_task_after_init = get_else_throw(current_task_after_init_monad, TaskNotFoundError(task_id))
-        if current_task_after_init.state == TesTaskState.CANCELED:
-            logger.warning(f"Task {task_id} found CANCELED shortly after RUNNING state update. Aborting handler.")
+        if task_monad_running.is_nothing():
+            # Canceled meanwhile: the next cancellation check (or the check after polling) ends the job.
+            logger.info(f"Task {task_id} is no longer INITIALIZING; not setting it RUNNING.")
             return
-
+        logger.info(f"Task {task_id} is running in Pulsar.")
         await update_last_task_log_time(
             task_id,
             author,
             TesTaskState.RUNNING,
-            start_time=Just(datetime.datetime.now(datetime.timezone.utc))
+            start_time=Just(command_start_time)
         )
+
+    try:
+        logger.info(f"Running task: {task_id}")
+        task_monad_init = await task_repository.get_task(maybe_of(author), {'_id': task_id})
+        task = get_else_throw(task_monad_init, TaskNotFoundError(task_id, Just(TesTaskState.INITIALIZING)))
+
+        # Early check for cancellation
+        if task.state == TesTaskState.CANCELED:
+            logger.warning(f"Task {task_id} found CANCELED before its job was submitted. Aborting handler.")
+            return
+        if task.state != TesTaskState.INITIALIZING:
+            raise TaskNotFoundError(task_id, Just(TesTaskState.INITIALIZING))
 
         # TES resources go to the batch system (native specification) and, per container.resource_limits, onto the
         # container command lines.
@@ -295,11 +304,11 @@ async def handle_run_task(event: Event) -> None:
         run_command_str = job_script(stage_in_cmd, *container_cmds, stage_out_cmd,
                                      ignore_errors=[bool(executor.ignore_error) for executor in task.executors])
 
-        command_start_time = datetime.datetime.now(datetime.timezone.utc)
         command_status: dict
 
         if run_command_str is None:
             logger.warning(f"Task {task_id} has no commands to run. Treating as successful no-op.")
+            await mark_running()
             command_status = {'stdout': '', 'stderr': 'No commands to run.', 'returncode': 0}
         else:
             logger.debug(f"Submitting job to Pulsar for task {task_id}: {redact_presigned_urls(run_command_str)}")
@@ -310,7 +319,8 @@ async def handle_run_task(event: Event) -> None:
                 task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
                 return task_monad.is_just() and task_monad.value.state == TesTaskState.CANCELED
 
-            command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled)
+            command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled,
+                                                                         on_started=mark_running)
 
         command_end_time = datetime.datetime.now(datetime.timezone.utc)
         # The job's own streams hold the stage-in and stage-out output; each executor's are read from its files.

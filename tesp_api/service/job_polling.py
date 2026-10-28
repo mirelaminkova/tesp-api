@@ -3,7 +3,7 @@ import math
 import time
 from dataclasses import dataclass, fields
 from functools import lru_cache
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 from loguru import logger
 
@@ -11,6 +11,10 @@ from tesp_api.config.properties import properties
 
 # Each wait is this much longer than the one before, up to pulsar.status.max_poll_interval.
 POLL_INTERVAL_GROWTH = 1.25
+
+# Pulsar job states before the job runs: Pulsar is staging it, or it waits in the batch system's queue (e.g. a SLURM
+# job pending on resources). Pulsar's other states mean the job runs or has run.
+NOT_STARTED_STATUSES = frozenset({'preprocessing', 'queued'})
 
 
 class TaskCanceledError(Exception):
@@ -73,6 +77,11 @@ def get_status_polling() -> StatusPolling:
     return load_status_polling()
 
 
+def job_started(status: dict) -> bool:
+    """Whether a Pulsar job status says the job has started running (or has already finished)."""
+    return status.get('complete') == 'true' or status.get('status') not in NOT_STARTED_STATUSES
+
+
 async def _canceled(is_canceled: Callable[[], Awaitable[bool]]) -> bool:
     try:
         return await is_canceled()
@@ -86,9 +95,13 @@ async def poll_until_complete(fetch_status: Callable[[], Awaitable[dict]],
                               is_canceled: Callable[[], Awaitable[bool]],
                               polling: StatusPolling,
                               is_transient: Callable[[Exception], bool] = lambda error: False,
-                              job_id: str = '', sleep=asyncio.sleep, clock=time.monotonic) -> dict:
+                              job_id: str = '', sleep=asyncio.sleep, clock=time.monotonic,
+                              on_started: Optional[Callable[[], Awaitable[None]]] = None) -> dict:
     """
     Requests the job status until Pulsar reports the job complete and returns that status.
+
+    ``on_started()`` is awaited once, at the first status that says the job has left the queue (see ``job_started``),
+    the complete status included, so it runs even for a job that queued, ran and finished between two requests.
 
     Raises ``TaskCanceledError`` once ``is_canceled()`` says so (checked before each request),
     ``PulsarJobTimeoutError`` when ``polling.max_wait_seconds`` is set and has passed, and the error of
@@ -97,6 +110,7 @@ async def poll_until_complete(fetch_status: Callable[[], Awaitable[dict]],
     started = clock()
     interval = polling.poll_interval
     failing_since = None
+    start_reported = on_started is None
     while True:
         await sleep(interval)
         interval = min(interval * POLL_INTERVAL_GROWTH, polling.max_poll_interval)
@@ -114,6 +128,9 @@ async def poll_until_complete(fetch_status: Callable[[], Awaitable[dict]],
             logger.warning(f'Pulsar status request for job {job_id} failed, retrying in {interval:g} s [{error}]')
         else:
             failing_since = None
+            if not start_reported and job_started(status):
+                start_reported = True
+                await on_started()
             if status.get('complete') == 'true':
                 return status
         if polling.max_wait_seconds and clock() - started >= polling.max_wait_seconds:

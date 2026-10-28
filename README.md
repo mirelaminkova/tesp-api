@@ -209,8 +209,11 @@ do not load Pulsar.
 | `pulsar.status.max_wait_seconds` | `TESP_API_PULSAR__STATUS__MAX_WAIT_SECONDS` | `0` | Longest a job may queue and run, in seconds; `0` means no limit. Past it `TESP API` asks Pulsar to cancel the job and the task ends in `SYSTEM_ERROR` with the reason in its system logs |
 | `pulsar.status.error_retry_seconds` | `TESP_API_PULSAR__STATUS__ERROR_RETRY_SECONDS` | `600` | How long connection errors, timeouts and 5xx/429 answers from Pulsar are retried before the task ends in `SYSTEM_ERROR`; a good answer starts the count again. `0` disables retries |
 
-A job that never finishes in Pulsar (e.g. a batch job pending on resources the cluster cannot provide) keeps its task
-`RUNNING` until it is canceled, unless `max_wait_seconds` is set. Other answers from Pulsar (4xx, a malformed status)
+A task stays `INITIALIZING` while Pulsar reports its job `queued` (e.g. a SLURM job pending behind other jobs) and
+becomes `RUNNING` at the first status request that finds the job running or finished; its log and executor log
+`start_time` is that moment, so queue time is not counted as run time. A job that never leaves the queue (e.g. pending
+on resources the cluster cannot provide) keeps its task `INITIALIZING` until it is canceled, unless
+`max_wait_seconds` is set (which counts queue time too). Other answers from Pulsar (4xx, a malformed status)
 end the task in `SYSTEM_ERROR` at once.
 
 `pulsar.status.max_polls` is deprecated and ignored (it used to fail every task still running after

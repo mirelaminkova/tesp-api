@@ -69,7 +69,10 @@ class FakePulsar:
     async def run_job(self, task_id, script, submit_params=None):
         self.script = script
 
-    async def job_status_complete(self, job_id, is_canceled):
+    async def job_status_complete(self, job_id, is_canceled, on_started=None):
+        # As poll_until_complete: the complete status also says the job has started.
+        if on_started is not None:
+            await on_started()
         return self.status
 
     def erase_job(self, task_id):
@@ -120,7 +123,9 @@ class ScriptPulsar(FakePulsar):
         stdout, stderr = process.communicate(timeout=30)
         self.result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
-    async def job_status_complete(self, job_id, is_canceled):
+    async def job_status_complete(self, job_id, is_canceled, on_started=None):
+        if on_started is not None:
+            await on_started()
         return_code = self.workdir.parent / "return_code"
         return {"job_id": job_id, "complete": "true", "status": "complete" if return_code.exists() else "failed",
                 # Pulsar's answer when the return_code file was never written
