@@ -200,6 +200,19 @@ def test_outputs():
     assert not os.path.exists(f"{uploaded}/outputs_http_missing.txt")
     _assert_skipped(task_id, ["/data/http_out/outputs_http_missing.txt", "/data/http_out/outputs_http_missing_dir"])
 
+    # logs[].outputs lists each uploaded file, directory outputs flattened, missing outputs left out (issue #31).
+    reported = _get_request(f"/v1/tasks/{task_id}?view=FULL")["logs"][-1]["outputs"]
+    assert sorted((o["path"], o["url"], o["size_bytes"]) for o in reported) == sorted([
+        ("/data/http_out/outputs_http_file.txt", upload_url, str(len(expected["outputs_http_file.txt"]))),
+        ("/data/http_out/results/outputs_http/top.txt", f"{upload_url}/outputs_http/top.txt",
+         str(len(expected["outputs_http/top.txt"]))),
+        ("/data/http_out/results/outputs_http/sub/nested.txt", f"{upload_url}/outputs_http/sub/nested.txt",
+         str(len(expected["outputs_http/sub/nested.txt"]))),
+    ])
+    stdout = "".join(executor_log.get("stdout") or "" for executor_log in
+                     _get_request(f"/v1/tasks/{task_id}?view=FULL")["logs"][-1]["logs"])
+    assert "tesp-api-output-" not in stdout
+
 def _assert_skipped(task_id, paths):
     """The stage-out script reports each skipped output on a line of its own in the task's stderr."""
     task = _get_request(f"/v1/tasks/{task_id}?view=FULL")
@@ -479,6 +492,15 @@ def test_s3_outputs():
     }
     _assert_skipped(task_id, ["/data/s3_out/missing.txt", "/data/s3_out/missing_dir"])
     _assert_no_s3_secrets_stored(task_id)
+
+    # logs[].outputs carries the task's s3:// URLs, the relative path of directory files percent-encoded (issue #31).
+    reported = _get_request(f"/v1/tasks/{task_id}?view=FULL")["logs"][-1]["outputs"]
+    base = f"s3://{S3_TEST_BUCKET}/{prefix}"
+    assert sorted((o["path"], o["url"]) for o in reported) == sorted([
+        ("/data/s3_out/result.txt", f"{base}/result.txt"),
+        ("/data/s3_out/results/top.txt", f"{base}/results/top.txt"),
+        ("/data/s3_out/results/sub dir/nested.txt", f"{base}/results/sub%20dir/nested.txt"),
+    ])
 
 # The job script is not traced (issue #18): executor env values, presigned S3 URLs and the host container commands
 # must not show up in the task's stored stdout/stderr logs.
