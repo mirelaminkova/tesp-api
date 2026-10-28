@@ -117,12 +117,15 @@ class PulsarOperations(ABC):
             raise PulsarOperationsError(ValueError(f'unexpected job status answer of type {type(status).__name__}'))
         return status
 
-    async def job_status_complete(self, job_id: str, is_canceled: Callable[[], Awaitable[bool]]) -> dict:
-        """Waits for the job to finish and returns its Pulsar status (see ``poll_until_complete``).
+    async def job_status_complete(self, job_id: str, is_canceled: Callable[[], Awaitable[bool]],
+                                  on_started: Optional[Callable[[], Awaitable[None]]] = None) -> dict:
+        """Waits for the job to finish and returns its Pulsar status (see ``poll_until_complete``); ``on_started`` is
+        awaited once the job has left the batch system's queue.
 
         Both implementations read the status from Pulsar's REST API."""
         return await poll_until_complete(lambda: self._job_status(job_id), is_canceled, self.status_polling,
-                                         is_transient=is_transient_pulsar_error, job_id=job_id)
+                                         is_transient=is_transient_pulsar_error, job_id=job_id,
+                                         on_started=on_started)
 
     @abstractmethod
     def upload(self, job_id: ObjectId, io_type: TesTaskIOType, file_path: str, file_content: Maybe[str]): pass
