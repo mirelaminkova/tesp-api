@@ -124,6 +124,18 @@ class PulsarOperations(ABC):
         return await poll_until_complete(lambda: self._job_status(job_id), is_canceled, self.status_polling,
                                          is_transient=is_transient_pulsar_error, job_id=job_id)
 
+    async def read_job_file(self, job_id: str, name: str) -> Optional[bytes]:
+        """A file in the job's working directory (where its command line runs), or None when there is no such file.
+        Both implementations read it from Pulsar's REST API."""
+        try:
+            return await self._pulsar_request(path=f'/jobs/{job_id}/files', method='GET', response_type='BYTES',
+                                              params={'name': name, 'type': 'output_workdir'},
+                                              raise_for_status=True)
+        except PulsarLayerConnectionError as error:
+            if error.http_status == 404:
+                return None
+            raise
+
     @abstractmethod
     def upload(self, job_id: ObjectId, io_type: TesTaskIOType, file_path: str, file_content: Maybe[str]): pass
 

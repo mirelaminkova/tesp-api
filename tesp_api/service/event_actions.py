@@ -1,6 +1,6 @@
 import os
 import datetime
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 import asyncio
 
@@ -11,7 +11,8 @@ from bson.objectid import ObjectId
 from pymonad.promise import Promise, _Promise
 
 from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes
-from tesp_api.utils.job_script import job_script, failed_stage, stage_failure_log
+from tesp_api.utils.job_script import job_script, failed_stage, stage_failure_log, executor_file, \
+    parse_executor_status, stream_text, tesp_api_notes
 from tesp_api.service.pulsar_service import pulsar_service
 from tesp_api.service.resources import get_resource_config
 from tesp_api.service.event_dispatcher import dispatch_event
@@ -23,10 +24,12 @@ from tesp_api.service.client.client_s3 import presign_s3_inputs, presign_s3_outp
 from tesp_api.service.error import pulsar_event_handle_error, pulsar_cancel_task_promise, TaskNotFoundError, \
     TaskExecutorError, repo_update_error_task_promise
 from tesp_api.service.job_polling import TaskCanceledError
-from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, DataType, job_streams
+from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, PulsarOperations, \
+    DataType, job_streams
 from tesp_api.repository.model.task import (
     TesTaskState,
     TesTaskExecutor,
+    TesTaskExecutorLog,
     TesTaskResources,
     TesTaskInput,
     TesTaskOutput,
@@ -166,6 +169,41 @@ async def handle_initializing_task(event: Event) -> None:
         .then(lambda x: x)
 
 
+async def read_executor_logs(pulsar_operations: PulsarOperations, job_id: str, status: dict,
+                             executor_count: int) -> Optional[List[TesTaskExecutorLog]]:
+    """
+    One log per executor that ran, from the files the job script wrote for it in the job's working directory (see
+    ``job_script``), or None when Pulsar does not list that directory (older Pulsar). A file that cannot be read is
+    logged and left out, rather than failing a task that ran.
+    """
+    if 'working_directory_contents' not in status:
+        return None
+    contents = set(status.get('working_directory_contents') or [])
+
+    async def read(name: str) -> Optional[bytes]:
+        try:
+            return await pulsar_operations.read_job_file(job_id, name)
+        except Exception as error:
+            logger.warning(f"Task {job_id}: cannot read {name} from Pulsar: {redact_presigned_urls(str(error))}")
+            return None
+
+    logs = []
+    for index in range(executor_count):
+        if executor_file(index, 'status') not in contents:
+            continue  # did not run
+        status_file = await read(executor_file(index, 'status'))
+        try:
+            start_time, end_time, exit_code = parse_executor_status(status_file)
+        except (AttributeError, ValueError):
+            logger.warning(f"Task {job_id}: unreadable status of executor {index}: {status_file!r}")
+            continue
+        logs.append(TesTaskExecutorLog(
+            start_time=start_time, end_time=end_time, exit_code=exit_code,
+            stdout=stream_text(await read(executor_file(index, 'stdout'))),
+            stderr=stream_text(await read(executor_file(index, 'stderr')))))
+    return logs
+
+
 @local_handler.register(event_name="run_task")
 async def handle_run_task(event: Event) -> None:
     """
@@ -270,16 +308,20 @@ async def handle_run_task(event: Event) -> None:
             command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled)
 
         command_end_time = datetime.datetime.now(datetime.timezone.utc)
+        # The job's own streams hold the stage-in and stage-out output; each executor's are read from its files.
         stdout, stderr = job_streams(command_status)
         stage = failed_stage(command_status)
-        # Executors ran unless stage-in or the submission failed; before a failed stage-out they all succeeded.
-        if stage not in ("stage-in", "submission"):
-            await append_task_executor_logs(
-                task_id, author, TesTaskState.RUNNING,
-                command_start_time, command_end_time,
-                stdout, stderr,
-                0 if stage == "stage-out" else command_status.get('returncode', -1)
-            )
+        executor_logs = await read_executor_logs(pulsar_operations, str(task_id), command_status, len(task.executors))
+        # Notes of the stage scripts (e.g. an output not found) as system logs; in the job's stderr only without
+        # executor output.
+        notes = [] if executor_logs is None else [redact_presigned_urls(note) for note in tesp_api_notes(stderr)]
+        if executor_logs is None:
+            # One log for the whole job, as with Pulsar before the executor files. Executors ran unless stage-in or
+            # the submission failed; before a failed stage-out they all succeeded.
+            executor_logs = [] if stage in ("stage-in", "submission") else [TesTaskExecutorLog(
+                start_time=command_start_time, end_time=command_end_time, stdout=stdout, stderr=stderr,
+                exit_code=0 if stage == "stage-out" else command_status.get('returncode', -1))]
+        await append_task_executor_logs(task_id, author, TesTaskState.RUNNING, command_end_time, executor_logs, notes)
 
         current_task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
         current_task_obj = get_else_throw(current_task_monad, TaskNotFoundError(task_id))
