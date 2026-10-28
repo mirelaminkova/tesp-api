@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 * In order to get latest version in an automated fashion run `ci/version.sh CHANGELOG.md`
 
+## [Unreleased]
+
+### Fixed
+- `GET /v1/service-info` comes from `service_info.*` settings with neutral defaults instead of the upstream
+  deployment's values, and its version is read once at startup, without a trailing newline (#69)
+
 ## [0.2.0] - 2026-02-10
 
 ### Added

@@ -42,6 +42,23 @@ s3.addressing_style = "path"      # "path", "virtual" or "auto"
 s3.presign_expiry_seconds = 3600  # lifetime of the download URLs handed to Pulsar
 s3.output_presign_expiry_seconds = 86400  # lifetime of the upload URLs; must cover the whole run of a task
 
+# GET /v1/service-info. Set these per deployment; empty values are left out of the answer, except id, name,
+# description and organization, which have neutral defaults (the tesp-api project). version defaults to the latest
+# release in CHANGELOG.md (set it, e.g. TESP_API_SERVICE_INFO__VERSION, to name the deployed commit). storage defaults
+# to s3.endpoint_url when that is set.
+service_info.id = ""                 # reverse domain name recommended, e.g. "org.example.tes"
+service_info.name = ""
+service_info.description = ""
+service_info.organization.name = ""
+service_info.organization.url = ""
+service_info.contact_url = ""        # e.g. "mailto:support@example.org"
+service_info.documentation_url = ""
+service_info.environment = ""        # e.g. "prod", "test", "dev", "staging"
+service_info.storage = []            # e.g. ["s3://bucket/"]
+service_info.version = ""
+service_info.created_at = ""         # RFC 3339, e.g. "2026-01-31T00:00:00Z"
+service_info.updated_at = ""
+
 [dev-docker]
 db.mongodb_uri = "mongodb://tesp-db:27017"
 pulsar.url = "http://pulsar_rest:8913"

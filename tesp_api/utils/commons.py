@@ -1,6 +1,7 @@
 import os
 import subprocess
 import logging
+from functools import lru_cache
 
 
 class Commons:
@@ -20,9 +21,11 @@ class Commons:
             raise e
 
     @classmethod
-    def get_service_version(cls):
+    @lru_cache(maxsize=1)
+    def get_service_version(cls) -> str:
+        """The version of the latest release in CHANGELOG.md, read once."""
         this_module_path = os.path.abspath(__file__)
         this_module_dir = os.path.dirname(this_module_path)
         script_path = os.path.join(this_module_dir, "../../ci/version.sh")
         change_log_path = os.path.join(this_module_dir, "../../CHANGELOG.md")
-        return cls.execute_script(script_path, change_log_path)
+        return cls.execute_script(script_path, change_log_path).strip()

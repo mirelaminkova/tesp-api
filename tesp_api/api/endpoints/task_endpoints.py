@@ -14,7 +14,7 @@ from tesp_api.repository.task_repository import task_repository
 from tesp_api.repository.model.task import TesTask, RegisteredTesTask, TesTaskState, TesTaskLog, \
     find_unsupported_s3_urls, find_unsupported_outputs, find_invalid_container_fields
 from tesp_api.utils.functional import maybe_of, identity_with_side_effect
-from tesp_api.api.model.task_service_info import TesServiceInfo, TesServiceType, TesServiceOrganization
+from tesp_api.api.model.task_service_info import TesServiceInfo
 from tesp_api.api.model.response_models import \
     TesGetAllTasksResponseModel,\
     TesCreateTaskResponseModel, \
@@ -27,10 +27,11 @@ from tesp_api.api.endpoints.endpoint_utils import \
     get_view, \
     list_query_params, resource_not_found_response, parse_verify_token
 
-from tesp_api.utils.commons import Commons
+from tesp_api.api import service_info
 
 
 router = APIRouter()
+service_info.get_service_info()  # invalid service_info.* settings stop tesp-api at startup, not at the first request
 
 
 @router.post("/tasks",
@@ -147,26 +148,7 @@ async def cancel_task(
 @router.get("/service-info",
             responses={200: {"description": "Ok"}},
             description=descriptions["service-info"],
-            response_model=TesServiceInfo)
-async def get_service_info() -> TesServiceInfo: # FastAPI directly handles Pydantic model return
-    return TesServiceInfo(
-        id="fi.muni.cz.tesp",
-        name="TESP",
-        type=TesServiceType(
-            group="org.ga4gh",
-            artifact="tes",
-            version="1.0.0"
-        ),
-        description="GA4GH TES Server implementation for Pulsar",
-        organization=TesServiceOrganization(
-            name="Faculty of Informatics, Masaryk University",
-            url="https://www.fi.muni.cz/"
-        ),
-        contactUrl="https://www.fi.muni.cz/",
-        documentationUrl="https://www.fi.muni.cz/",
-        createdAt="2021-10-26T00:00:00Z",
-        updatedAt="2021-10-26T00:00:00Z",
-        environment="dev",
-        version=Commons.get_service_version(),
-        storage=["https://www.fi.muni.cz/"]
-    )
+            response_model=TesServiceInfo,
+            response_model_exclude_none=True)
+async def get_service_info() -> TesServiceInfo:
+    return service_info.get_service_info()
