@@ -121,7 +121,7 @@ async def get_tasks(
         .then(lambda get_tasks_args: task_repository.get_tasks(*get_tasks_args))\
         .map(lambda tasks_and_token: response_from_model(
             TesGetAllTasksResponseModel(
-                next_page_token=str(tasks_and_token[1]),
+                next_page_token=str(tasks_and_token[1]) if tasks_and_token[1] else None,
                 tasks=list(map(lambda task: task.dict(**get_view(query_params['view'])), tasks_and_token[0])))
         )).catch(api_handle_error)
 
