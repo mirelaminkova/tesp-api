@@ -1,6 +1,6 @@
 import os
 import datetime
-from typing import List, Optional, Tuple
+from typing import Awaitable, List, Optional, Tuple
 from pathlib import Path
 import asyncio
 
@@ -24,6 +24,7 @@ from tesp_api.service.client.client_s3 import presign_s3_inputs, presign_s3_outp
 from tesp_api.service.error import pulsar_event_handle_error, pulsar_cancel_task_promise, TaskNotFoundError, \
     TaskExecutorError, repo_update_error_task_promise
 from tesp_api.service.job_polling import TaskCanceledError
+import tesp_api.service.task_recovery as task_recovery
 from tesp_api.service.pulsar_operations import PulsarRestOperations, PulsarAmqpOperations, PulsarOperations, \
     DataType, job_streams
 from tesp_api.repository.model.task import (
@@ -64,6 +65,7 @@ async def handle_queued_task_rest(event: Event):
     pulsar_operations: PulsarRestOperations = payload['pulsar_operations']
 
     logger.debug(f"Queued task rest: {task_id}")
+    await task_recovery.take(task_id)
 
     await Promise(lambda resolve, reject: resolve(None)) \
         .then(lambda nothing: pulsar_operations.setup_job(task_id)) \
@@ -84,6 +86,7 @@ async def handle_queued_task_amqp(event: Event):
     logger.debug(f"Queued task AMQP: {task_id}")
 
     try:
+        await task_recovery.take(task_id)
         # Setup job via AMQP
         setup_job_result = await pulsar_operations.setup_job(task_id)
 
@@ -211,10 +214,9 @@ async def read_executor_logs(pulsar_operations: PulsarOperations, job_id: str, s
 @local_handler.register(event_name="run_task")
 async def handle_run_task(event: Event) -> None:
     """
-    Prepares and submits the job to Pulsar, sets the task RUNNING once Pulsar reports the job has left the batch
-    system's queue, waits for completion, logs results, and updates task state accordingly (COMPLETE, EXECUTOR_ERROR,
-    or SYSTEM_ERROR when staging or the submission failed).
-    Handles cancellations and other exceptions during its lifecycle.
+    Prepares and submits the job to Pulsar, then waits for it to finish (see ``_wait_and_finish``): the task becomes
+    RUNNING once Pulsar reports the job has left the batch system's queue, and ends COMPLETE, EXECUTOR_ERROR, or
+    SYSTEM_ERROR when staging or the submission failed.
     """
     event_name, payload = event
     task_id: ObjectId = payload['task_id']
@@ -225,31 +227,8 @@ async def handle_run_task(event: Event) -> None:
     output_confs: List[dict] = payload['output_confs']
     pulsar_operations: PulsarRestOperations = payload['pulsar_operations']
 
-    run_command_str = None
-    command_start_time = datetime.datetime.now(datetime.timezone.utc)
-
-    async def mark_running() -> None:
-        # The task stays INITIALIZING while its job waits in the batch system's queue (issue #65).
-        nonlocal command_start_time
-        command_start_time = datetime.datetime.now(datetime.timezone.utc)
-        task_monad_running = await task_repository.update_task_state(
-            task_id,
-            TesTaskState.INITIALIZING,
-            TesTaskState.RUNNING
-        )
-        if task_monad_running.is_nothing():
-            # Canceled meanwhile: the next cancellation check (or the check after polling) ends the job.
-            logger.info(f"Task {task_id} is no longer INITIALIZING; not setting it RUNNING.")
-            return
-        logger.info(f"Task {task_id} is running in Pulsar.")
-        await update_last_task_log_time(
-            task_id,
-            author,
-            TesTaskState.RUNNING,
-            start_time=Just(command_start_time)
-        )
-
-    try:
+    async def run():
+        nonlocal resource_conf
         logger.info(f"Running task: {task_id}")
         task_monad_init = await task_repository.get_task(maybe_of(author), {'_id': task_id})
         task = get_else_throw(task_monad_init, TaskNotFoundError(task_id, Just(TesTaskState.INITIALIZING)))
@@ -304,107 +283,179 @@ async def handle_run_task(event: Event) -> None:
         run_command_str = job_script(stage_in_cmd, *container_cmds, stage_out_cmd,
                                      ignore_errors=[bool(executor.ignore_error) for executor in task.executors])
 
-        command_status: dict
-
         if run_command_str is None:
             logger.warning(f"Task {task_id} has no commands to run. Treating as successful no-op.")
-            await mark_running()
-            command_status = {'stdout': '', 'stderr': 'No commands to run.', 'returncode': 0}
-        else:
-            logger.debug(f"Submitting job to Pulsar for task {task_id}: {redact_presigned_urls(run_command_str)}")
-            await pulsar_operations.run_job(task_id, run_command_str, submit_params)
-
-            # POST /tasks/{id}:cancel only marks the task; polling notices it and ends the Pulsar job below.
-            async def is_canceled() -> bool:
-                task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
-                return task_monad.is_just() and task_monad.value.state == TesTaskState.CANCELED
-
-            command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled,
-                                                                         on_started=mark_running)
-
-        command_end_time = datetime.datetime.now(datetime.timezone.utc)
-        # The job's own streams hold the stage-in and stage-out output; each executor's are read from its files.
-        stdout, stderr = job_streams(command_status)
-        stage = failed_stage(command_status)
-        executor_logs, killed = await read_executor_logs(pulsar_operations, str(task_id), command_status,
-                                                         len(task.executors))
-        # Notes of the stage scripts (e.g. an output not found) as system logs; in the job's stderr only without
-        # executor output.
-        notes = killed + ([] if executor_logs is None else
-                          [redact_presigned_urls(note) for note in tesp_api_notes(stderr)])
-        if executor_logs is None:
-            # One log for the whole job, as with Pulsar before the executor files. Executors ran unless stage-in or
-            # the submission failed; before a failed stage-out they all succeeded.
-            executor_logs = [] if stage in ("stage-in", "submission") else [TesTaskExecutorLog(
-                start_time=command_start_time, end_time=command_end_time, stdout=stdout, stderr=stderr,
-                exit_code=0 if stage == "stage-out" else command_status.get('returncode', -1))]
-        await append_task_executor_logs(task_id, author, TesTaskState.RUNNING, command_end_time, executor_logs, notes)
-
-        current_task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
-        current_task_obj = get_else_throw(current_task_monad, TaskNotFoundError(task_id))
-
-        if current_task_obj.state == TesTaskState.CANCELED:
-            logger.warning(f"Task {task_id} found CANCELED after job completion polling. Aborting state changes.")
-            await pulsar_cancel_task_promise(str(task_id), pulsar_operations)  # erase the finished job's files
+            start_time = await _mark_running(task_id, author)
+            await _finish(task_id, author, pulsar_operations, event_name, len(task.executors), start_time,
+                          {'stdout': '', 'stderr': 'No commands to run.', 'returncode': 0})
             return
 
-        if stage is not None:
-            logger.error(f"Task {task_id} {stage} failed (return code: {command_status.get('returncode')}). "
-                         f"Setting state to SYSTEM_ERROR.")
-            system_log = redact_presigned_urls(stage_failure_log(stage, command_status.get('returncode'), stderr))
-            await repo_update_error_task_promise(task_id, TesTaskState.SYSTEM_ERROR, Just(system_log),
-                                                 unless_canceled=True)
-            await pulsar_operations.erase_job(task_id)
-            return
+        logger.debug(f"Submitting job to Pulsar for task {task_id}: {redact_presigned_urls(run_command_str)}")
+        await pulsar_operations.run_job(task_id, run_command_str, submit_params)
+        # From here on another tesp-api process can resume the wait if this one stops (see task_recovery).
+        await task_recovery.mark_submitted(task_id)
+        await _wait_and_finish(task_id, author, pulsar_operations, event_name, len(task.executors))
 
-        if command_status.get('returncode', -1) != 0:
-            logger.error(
-                f"Task {task_id} executor error (return code: {command_status.get('returncode', -1)}). Setting state to EXECUTOR_ERROR.")
-            await task_repository.update_task_state(task_id, TesTaskState.RUNNING, TesTaskState.EXECUTOR_ERROR)
-            await pulsar_operations.erase_job(task_id)
-            return
+    await _guarded(run(), task_id, author, pulsar_operations, event_name)
 
-        logger.info(f"Task {task_id} completed successfully. Setting state to COMPLETE.")
-        await Promise(lambda resolve, reject: resolve(None)) \
-            .then(lambda ignored: task_repository.update_task_state(
-            task_id, TesTaskState.RUNNING, TesTaskState.COMPLETE
-        )) \
-            .map(lambda task_after_complete_update: get_else_throw(
-            task_after_complete_update, TaskNotFoundError(task_id, Just(TesTaskState.RUNNING))
-        )) \
-            .then(lambda ignored: pulsar_operations.erase_job(task_id)) \
-            .catch(lambda error: pulsar_event_handle_error(error, task_id, event_name, pulsar_operations)) \
-            .then(lambda x: x)
+
+@local_handler.register(event_name="resume_task")
+async def handle_resume_task(event: Event) -> None:
+    """
+    Waits for the Pulsar job of a task that a stopped tesp-api process submitted (see ``task_recovery``): a RUNNING
+    task, or an INITIALIZING one whose job was still queued in the batch system.
+    """
+    event_name, payload = event
+    task_id: ObjectId = payload['task_id']
+    author: Optional[str] = payload['author']
+    pulsar_operations: PulsarRestOperations = payload['pulsar_operations']
+
+    async def run():
+        task = get_else_throw(await task_repository.get_task(maybe_of(author), {'_id': task_id}),
+                              TaskNotFoundError(task_id))
+        # A RUNNING task's log started when its job started running, before the restart.
+        start_time = (task.logs[-1].start_time if task.logs and task.state == TesTaskState.RUNNING else None)
+        await _wait_and_finish(task_id, author, pulsar_operations, event_name, len(task.executors), start_time)
+
+    await _guarded(run(), task_id, author, pulsar_operations, event_name)
+
+
+async def _mark_running(task_id: ObjectId, author: Optional[str]) -> datetime.datetime:
+    """
+    Sets an INITIALIZING task RUNNING, with its log's start time, once its job has left the batch system's queue
+    (issue #65), and returns that time. A task that is no longer INITIALIZING (canceled meanwhile) is left alone: the
+    next cancellation check, or the check after polling, ends the job.
+    """
+    start_time = datetime.datetime.now(datetime.timezone.utc)
+    task_monad_running = await task_repository.update_task_state(task_id, TesTaskState.INITIALIZING,
+                                                                 TesTaskState.RUNNING)
+    if task_monad_running.is_nothing():
+        logger.info(f"Task {task_id} is no longer INITIALIZING; not setting it RUNNING.")
+        return start_time
+    logger.info(f"Task {task_id} is running in Pulsar.")
+    await update_last_task_log_time(task_id, author, TesTaskState.RUNNING, start_time=Just(start_time))
+    return start_time
+
+
+async def _wait_and_finish(task_id: ObjectId, author: Optional[str], pulsar_operations: PulsarOperations,
+                           event_name: str, executor_count: int,
+                           start_time: Optional[datetime.datetime] = None) -> None:
+    """
+    Waits for the task's submitted Pulsar job to finish and records its outcome (see ``_finish``). ``start_time`` is
+    when the job started running, if the task is RUNNING already (a resumed wait); else the task is set RUNNING when
+    Pulsar reports the job has left the queue.
+    """
+    started = {'at': start_time}
+
+    async def on_started() -> None:
+        if started['at'] is None:
+            started['at'] = await _mark_running(task_id, author)
+
+    # POST /tasks/{id}:cancel only marks the task; polling notices it and ends the Pulsar job (see _guarded).
+    async def is_canceled() -> bool:
+        task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
+        return task_monad.is_just() and task_monad.value.state == TesTaskState.CANCELED
+
+    command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled, on_started=on_started)
+    await _finish(task_id, author, pulsar_operations, event_name, executor_count,
+                  started['at'] or datetime.datetime.now(datetime.timezone.utc), command_status)
+
+
+async def _finish(task_id: ObjectId, author: Optional[str], pulsar_operations: PulsarOperations, event_name: str,
+                  executor_count: int, command_start_time: datetime.datetime, command_status: dict) -> None:
+    """
+    Stores the executor logs of the finished job and sets the task COMPLETE, EXECUTOR_ERROR, or SYSTEM_ERROR when
+    staging or the submission failed.
+    """
+    command_end_time = datetime.datetime.now(datetime.timezone.utc)
+    # The job's own streams hold the stage-in and stage-out output; each executor's are read from its files.
+    stdout, stderr = job_streams(command_status)
+    stage = failed_stage(command_status)
+    executor_logs, killed = await read_executor_logs(pulsar_operations, str(task_id), command_status,
+                                                     executor_count)
+    # Notes of the stage scripts (e.g. an output not found) as system logs; in the job's stderr only without
+    # executor output.
+    notes = killed + ([] if executor_logs is None else
+                      [redact_presigned_urls(note) for note in tesp_api_notes(stderr)])
+    if executor_logs is None:
+        # One log for the whole job, as with Pulsar before the executor files. Executors ran unless stage-in or
+        # the submission failed; before a failed stage-out they all succeeded.
+        executor_logs = [] if stage in ("stage-in", "submission") else [TesTaskExecutorLog(
+            start_time=command_start_time, end_time=command_end_time, stdout=stdout, stderr=stderr,
+            exit_code=0 if stage == "stage-out" else command_status.get('returncode', -1))]
+    await append_task_executor_logs(task_id, author, TesTaskState.RUNNING, command_end_time, executor_logs, notes)
+
+    current_task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
+    current_task_obj = get_else_throw(current_task_monad, TaskNotFoundError(task_id))
+
+    if current_task_obj.state == TesTaskState.CANCELED:
+        logger.warning(f"Task {task_id} found CANCELED after job completion polling. Aborting state changes.")
+        await pulsar_cancel_task_promise(str(task_id), pulsar_operations)  # erase the finished job's files
+        return
+
+    if stage is not None:
+        logger.error(f"Task {task_id} {stage} failed (return code: {command_status.get('returncode')}). "
+                     f"Setting state to SYSTEM_ERROR.")
+        system_log = redact_presigned_urls(stage_failure_log(stage, command_status.get('returncode'), stderr))
+        await repo_update_error_task_promise(task_id, TesTaskState.SYSTEM_ERROR, Just(system_log),
+                                             unless_canceled=True)
+        await pulsar_operations.erase_job(task_id)
+        return
+
+    if command_status.get('returncode', -1) != 0:
+        logger.error(
+            f"Task {task_id} executor error (return code: {command_status.get('returncode', -1)}). Setting state to EXECUTOR_ERROR.")
+        await task_repository.update_task_state(task_id, TesTaskState.RUNNING, TesTaskState.EXECUTOR_ERROR)
+        await pulsar_operations.erase_job(task_id)
+        return
+
+    logger.info(f"Task {task_id} completed successfully. Setting state to COMPLETE.")
+    await Promise(lambda resolve, reject: resolve(None)) \
+        .then(lambda ignored: task_repository.update_task_state(
+        task_id, TesTaskState.RUNNING, TesTaskState.COMPLETE
+    )) \
+        .map(lambda task_after_complete_update: get_else_throw(
+        task_after_complete_update, TaskNotFoundError(task_id, Just(TesTaskState.RUNNING))
+    )) \
+        .then(lambda ignored: pulsar_operations.erase_job(task_id)) \
+        .catch(lambda error: pulsar_event_handle_error(error, task_id, event_name, pulsar_operations)) \
+        .then(lambda x: x)
+
+
+async def _guarded(work: Awaitable[None], task_id: ObjectId, author: Optional[str],
+                   pulsar_operations: PulsarOperations, event_name: str) -> None:
+    """
+    Runs a task's ``run_task``/``resume_task`` work, handles its cancellation and errors, and drops the task's lease
+    once it reached a final state.
+    """
+    try:
+        await work
 
     except TaskCanceledError:
         logger.info(f"Task {task_id} was canceled while its Pulsar job ran. Stopped polling, canceling the job.")
         await pulsar_cancel_task_promise(str(task_id), pulsar_operations)
 
     except asyncio.CancelledError:
-        logger.warning(f"handle_run_task for task {task_id} was explicitly cancelled (asyncio.CancelledError).")
-        await task_repository.update_task_state(task_id, None, TesTaskState.CANCELED)
-        await pulsar_operations.kill_job(task_id)
-        await pulsar_operations.erase_job(task_id)
-        logger.info(f"Task {task_id} Pulsar job cleanup attempted after asyncio cancellation.")
+        # tesp-api is shutting down, not the client canceling. The task keeps its state and its Pulsar job goes on;
+        # another tesp-api process resumes waiting for it (see task_recovery).
+        logger.info(f"Stopped waiting for task {task_id}: tesp-api is shutting down. Its Pulsar job goes on.")
+        raise
 
     except Exception as error:
-        logger.error(f"Exception in handle_run_task for task {task_id}: {type(error).__name__} - "
+        logger.error(f"Exception in {event_name} for task {task_id}: {type(error).__name__} - "
                      f"{redact_presigned_urls(str(error))}")
 
         task_state_after_error_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
         if task_state_after_error_monad.is_just() and task_state_after_error_monad.value.state == TesTaskState.CANCELED:
             logger.info(
                 f"Task {task_id} is already CANCELED. Exception '{type(error).__name__}' likely due to this. No further error processing by handler.")
-            return
+        else:
+            logger.debug(f"Task {task_id} not CANCELED; proceeding with pulsar_event_handle_error for '{type(error).__name__}'.")
+            error_handler_result = pulsar_event_handle_error(error, task_id, event_name, pulsar_operations)
+            if asyncio.iscoroutine(error_handler_result) or isinstance(error_handler_result, _Promise):
+                await error_handler_result
 
-        logger.debug(f"Task {task_id} not CANCELED; proceeding with pulsar_event_handle_error for '{type(error).__name__}'.")
-        error_handler_result = pulsar_event_handle_error(error, task_id, event_name, pulsar_operations)
-        if asyncio.iscoroutine(error_handler_result) or isinstance(error_handler_result, _Promise):
-            await error_handler_result
-
-        # try:
-        #     print(f"Ensuring Pulsar job for task {task_id} is erased after general error handling in run_task.")
-        #     await pulsar_operations.erase_job(task_id)
-        # except Exception as final_erase_error:
-        #     print(
-        #        f"Error during final Pulsar erase attempt for task {task_id} after general error: {final_erase_error}")
+    try:
+        await task_recovery.release(task_id)
+    except Exception as error:
+        logger.warning(f"Could not release the lease of task {task_id} [{type(error).__name__}: {error}]")

@@ -146,6 +146,13 @@ class FakeTaskRepository:
             doc.update(update_query['$set'])
         return _resolved(maybe_of(doc).map(lambda found: RegisteredTesTask(**found)))
 
+    def update_tasks(self, search_query, update_query):
+        # The lease and submission marks of tesp_api.service.task_recovery (only by _id here)
+        doc = self._find({'_id': search_query['_id']})
+        if doc is not None:
+            doc.update(update_query.get('$set', {}))
+        return _resolved(0 if doc is None else 1)
+
     def update_task_state(self, task_id, old_state, new_state):
         query = {'_id': task_id} if old_state is None else {'_id': task_id, 'state': old_state}
         return self.update_task(query, {'$set': {'state': new_state}})
@@ -192,7 +199,7 @@ def repo(monkeypatch):
     module.task_repository = fake
     monkeypatch.setitem(sys.modules, 'tesp_api.repository.task_repository', module)
     for name in ('tesp_api.service.error', 'tesp_api.repository.task_repository_utils',
-                 'tesp_api.service.event_actions'):
+                 'tesp_api.service.task_recovery', 'tesp_api.service.event_actions'):
         monkeypatch.setitem(sys.modules, name, None)  # restored after the test
         del sys.modules[name]
     return fake

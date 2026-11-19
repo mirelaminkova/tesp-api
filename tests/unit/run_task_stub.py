@@ -21,7 +21,7 @@ from tesp_api.repository.model.task import TesTaskExecutor, TesTaskExecutorLog, 
 
 # Modules that import the task repository or the Pulsar service, directly or through each other
 _STUBBED_IMPORTERS = ('tesp_api.service.event_actions', 'tesp_api.service.error',
-                      'tesp_api.repository.task_repository_utils')
+                      'tesp_api.repository.task_repository_utils', 'tesp_api.service.task_recovery')
 
 
 def _resolved(value=None) -> Promise:
@@ -47,6 +47,11 @@ class FakeRepository:
 
     async def get_task(self, author, query):
         return Just(self.task)
+
+    def update_tasks(self, query, update):
+        # The lease and submission marks of tesp_api.service.task_recovery
+        self.task.marks = {**getattr(self.task, 'marks', {}), **update.get('$set', {})}
+        return _resolved(1)
 
     def update_task(self, query, update):
         self.task.state = update['$set']['state']
@@ -162,6 +167,7 @@ def run_task(monkeypatch, status: Optional[dict], executors: List[TesTaskExecuto
     repository = FakeRepository(task)
     monkeypatch.setattr(event_actions, 'task_repository', repository)
     monkeypatch.setattr(sys.modules['tesp_api.service.error'], 'task_repository', repository)
+    monkeypatch.setattr(event_actions.task_recovery, 'task_repository', repository)
 
     async def append_task_executor_logs(task_id, author, state, end, executor_logs, system_logs=()):
         task.executor_logs.extend(executor_logs)

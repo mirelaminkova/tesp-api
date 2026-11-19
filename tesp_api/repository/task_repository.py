@@ -46,6 +46,24 @@ class TaskRepository:
                    .map(lambda _task: RegisteredTesTask(**task)))\
             .catch(handle_data_layer_error)
 
+    def update_raw_task(self, search_query: Dict[str, Any], update_query: Dict[str, Any]) -> Promise:
+        """Like ``update_task``, but the updated document is returned as stored (``Maybe[dict]``), with fields that
+        ``RegisteredTesTask`` does not know, such as the lease of ``tesp_api.service.task_recovery``."""
+        return Promise(lambda resolve, reject: resolve((search_query, update_query)))\
+            .then(lambda search_and_update_query: self._tasks.find_one_and_update(
+                search_and_update_query[0],
+                search_and_update_query[1],
+                return_document=ReturnDocument.AFTER
+            )).map(maybe_of)\
+            .catch(handle_data_layer_error)
+
+    def update_tasks(self, search_query: Dict[str, Any], update_query: Dict[str, Any]) -> Promise:
+        """Updates every matching task; resolves to the number of tasks changed."""
+        return Promise(lambda resolve, reject: resolve((search_query, update_query)))\
+            .then(lambda search_and_update_query: self._tasks.update_many(*search_and_update_query))\
+            .map(lambda result: result.modified_count)\
+            .catch(handle_data_layer_error)
+
     def update_task_state(
             self,
             task_id: ObjectId,
