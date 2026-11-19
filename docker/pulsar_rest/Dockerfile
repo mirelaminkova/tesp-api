@@ -22,7 +22,9 @@ FROM python-base as builder
 WORKDIR $PYSETUP_PATH
 RUN python3 -m venv $VENV_PATH && . .venv/bin/activate
 ARG PULSAR_VERSION=0.16.0
-RUN pip install "pulsar-app[web]==${PULSAR_VERSION}"
+# constraints.txt pins every dependency too, so rebuilds get the same versions; update it with PULSAR_VERSION.
+COPY constraints.txt ./
+RUN pip install -c constraints.txt "pulsar-app[web]==${PULSAR_VERSION}"
 
 
 # Development installs all dependencies and can be used
