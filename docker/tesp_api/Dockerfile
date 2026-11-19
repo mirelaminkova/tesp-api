@@ -27,18 +27,17 @@ RUN buildDeps="build-essential" \
     && apt-get install -y --no-install-recommends $buildDeps \
     && rm -rf /var/lib/apt/lists/*
 
-# Install poetry, pinned. Poetry 1.1.x breaks with current `packaging`
-# (canonicalize_version() got an unexpected keyword 'strip_trailing_zero').
-ENV POETRY_VERSION=1.8.5
+# Install poetry, pinned to the version that wrote poetry.lock (see its header).
+ENV POETRY_VERSION=2.2.1
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN python3 -m venv $POETRY_HOME \
     && $POETRY_HOME/bin/pip install "poetry==$POETRY_VERSION"
 
 # Copy python requirements and install runtime deps
 WORKDIR $PYSETUP_PATH
-#COPY ./poetry.lock ./pyproject.toml ./
-COPY ./pyproject.toml ./
-RUN poetry install --no-dev --no-root
+# Install from the committed lock file so every build gets the same versions.
+COPY ./poetry.lock ./pyproject.toml ./
+RUN poetry install --only main --no-root
 
 
 # Development installs all dependencies and can be used

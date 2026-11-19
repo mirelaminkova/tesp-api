@@ -49,6 +49,8 @@ services:
       dockerfile: Dockerfile
       target: development
     image: pulsar_rest
+    # Apptainer publishes amd64 .deb files only.
+    platform: linux/amd64
     profiles: ["pulsar"]
     container_name: pulsar-rest
     privileged: true
