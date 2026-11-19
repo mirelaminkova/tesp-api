@@ -10,7 +10,7 @@ from pydantic.class_validators import root_validator
 
 from tesp_api.utils.types import AnyUrl, FtpUrl, S3Url, HttpUrl, HttpsUrl, LocalFileUrl
 from tesp_api.repository.model.py_object_id import PyObjectId
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, root_validator, validator
 from typing import Union
 
 
@@ -134,6 +134,16 @@ class TesTaskExecutor(BaseModel):
         "HMMERDB": "/data/hmmer"
     }, description='Enviromental variables to set within the container. Example: { "env" : { "ENV_CONFIG_PATH" :'
                    ' "/data/config.file", "BLASTDB" : "/data/GRC38", "HMMERDB" : "/data/hmmer" } }')
+    ignore_error: bool = Field(False, example=False,
+                               description='Default behavior of running an array of executors is that execution'
+                                           ' stops on the first error. If `ignore_error` is `True`, then the'
+                                           ' runner will record error exit codes, but will continue on to the next'
+                                           ' tesExecutor.')
+
+    @validator('ignore_error', pre=True)
+    def _null_ignore_error_is_false(cls, value):
+        # TES: false unless set; a client sending null means the same.
+        return False if value is None else value
 
 
 class TesTaskExecutorLog(BaseModel):
