@@ -239,8 +239,10 @@ class ContainerCommandBuilder:
         " ".join(shlex.quote(arg) for arg in cmd) if isinstance(cmd, list) else cmd)
 
         # Build final command
-        # --no-eval: Apptainer otherwise shell-evaluates env values inside the container, unlike docker
-        runtime = "docker run" if docker else "singularity exec --no-eval"
+        # --no-eval: Apptainer otherwise shell-evaluates env values inside the container, unlike docker.
+        # --quiet: keeps Apptainer's INFO lines (image pull and conversion, "Using cached SIF image") out of the
+        # executor's stderr; errors are still printed.
+        runtime = "docker run" if docker else "singularity --quiet exec --no-eval"
         container_cmd = " ".join(filter(None, [
             *env_prefix, runtime, cpu_flag, mem_flag, workdir_flag, *env_flags, *mount_flags, image, command_str]))
         return " && ".join([*mkdir_cmds, container_cmd])

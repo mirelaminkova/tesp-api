@@ -11,8 +11,8 @@ import subprocess
 import pytest
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskState
-from tesp_api.utils.job_script import JOB_STARTED_FILE, STAGE_FAILED_FILES, failed_stage, job_script, \
-    stage_failure_log
+from tesp_api.utils.job_script import JOB_STARTED_FILE, STAGE_FAILED_FILES, executor_file, failed_stage, \
+    job_script, stage_failure_log
 from tests.unit.run_task_stub import run_task
 
 CURL_404 = "curl: (22) The requested URL returned error: 404"
@@ -47,7 +47,7 @@ def test_failing_stage_in_skips_the_rest_and_is_marked(tmp_path):
 
 def test_failing_stage_out_is_marked(tmp_path):
     result = _run(job_script("echo stage-in", "echo executor", "echo stage-out; exit 7"), tmp_path)
-    assert result.stdout == "stage-in\nexecutor\nstage-out\n"
+    assert result.stdout == "stage-in\nstage-out\n"  # the executor's output is in its own file (issue #67)
     assert (tmp_path / "return_code").read_text() == "7\n"
     assert failed_stage(_status(tmp_path)) == "stage-out"
 
@@ -67,8 +67,8 @@ def test_failing_part_of_a_stage_list_fails_the_stage(tmp_path):
 
 
 def test_successful_job_leaves_only_the_start_marker(tmp_path):
-    result = _run(job_script("echo 1", "echo 2", "echo 3", "echo 4"), tmp_path)
-    assert result.stdout == "1\n2\n3\n4\n"
+    result = _run(job_script("echo 1", "", "echo 4"), tmp_path)
+    assert result.stdout == "1\n4\n"
     assert (tmp_path / "return_code").read_text() == "0\n"
     assert sorted(os.listdir(tmp_path)) == sorted([JOB_STARTED_FILE, "return_code"])
 
@@ -127,6 +127,12 @@ def test_system_log_is_bounded():
 # --- The task's final state -------------------------------------------------------------------------------------------
 
 EXECUTOR = TesTaskExecutor(image="ubuntu", command=["echo", "hi"])
+
+
+def _ran(index: int, stdout: str, exit_code: int) -> dict:
+    """The files executor ``index`` leaves in the job's working directory (issue #67)."""
+    return {executor_file(index, "status"): f"1700000000 1700000001 {exit_code}\n".encode(),
+            executor_file(index, "stdout"): stdout.encode(), executor_file(index, "stderr"): b""}
 INPUT = [{"container_path": "/data/in.txt", "pulsar_path": "/pulsar/abc/inputs/input_file_0",
           "url": "http://example.org/does-not-exist.txt", "type": "FILE"}]
 
@@ -143,12 +149,13 @@ def test_task_with_failed_stage_in_ends_in_system_error(monkeypatch):
 
 
 def test_task_with_failed_stage_out_ends_in_system_error_with_executor_log(monkeypatch):
-    status = {"status": "complete", "returncode": 6, "job_stdout": "hi\n", "job_stderr": "curl: (6) no host\n",
-              "working_directory_contents": [JOB_STARTED_FILE, STAGE_FAILED_FILES["stage-out"]]}
+    files = _ran(0, "hi\n", 0)
+    status = {"status": "complete", "returncode": 6, "job_stdout": "", "job_stderr": "curl: (6) no host\n",
+              "working_directory_contents": [JOB_STARTED_FILE, *files, STAGE_FAILED_FILES["stage-out"]]}
     output = [{"container_path": "/data/out.txt", "url": "http://example.org/up", "volume_name": "v", "type": "FILE"}]
-    task, _ = run_task(monkeypatch, status, [EXECUTOR], output_confs=output)
+    task, _ = run_task(monkeypatch, status, [EXECUTOR], output_confs=output, files=files)
     assert task.state == TesTaskState.SYSTEM_ERROR
-    assert [log["exit_code"] for log in task.executor_logs] == [0]
+    assert [log.exit_code for log in task.executor_logs] == [0]
     assert "stage-out failed (exit code 6)" in task.system_logs[0]
 
 
@@ -162,11 +169,12 @@ def test_task_the_batch_system_refused_ends_in_system_error(monkeypatch):
 
 
 def test_failing_executor_still_ends_in_executor_error(monkeypatch):
-    status = {"status": "complete", "returncode": 3, "job_stdout": "before-fail\n", "job_stderr": "",
-              "working_directory_contents": [JOB_STARTED_FILE]}
-    task, _ = run_task(monkeypatch, status, [EXECUTOR])
+    files = _ran(0, "before-fail\n", 3)
+    status = {"status": "complete", "returncode": 3, "job_stdout": "", "job_stderr": "",
+              "working_directory_contents": [JOB_STARTED_FILE, *files]}
+    task, _ = run_task(monkeypatch, status, [EXECUTOR], files=files)
     assert task.state == TesTaskState.EXECUTOR_ERROR
-    assert task.executor_logs == [{"stdout": "before-fail\n", "stderr": "", "exit_code": 3}]
+    assert [(log.stdout, log.stderr, log.exit_code) for log in task.executor_logs] == [("before-fail\n", "", 3)]
     assert task.system_logs == []
 
 

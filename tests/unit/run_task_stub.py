@@ -5,14 +5,19 @@ Pulsar service opens an aiohttp session at import, so both are replaced in ``sys
 """
 import asyncio
 import importlib
+import os
+import signal
+import subprocess
 import sys
+import time
 import types
-from typing import List, Optional
+from pathlib import Path
+from typing import Dict, List, Optional
 
 from pymonad.maybe import Just
 from pymonad.promise import Promise
 
-from tesp_api.repository.model.task import TesTaskExecutor, TesTaskState
+from tesp_api.repository.model.task import TesTaskExecutor, TesTaskExecutorLog, TesTaskState
 
 # Modules that import the task repository or the Pulsar service, directly or through each other
 _STUBBED_IMPORTERS = ('tesp_api.service.event_actions', 'tesp_api.service.error',
@@ -27,7 +32,7 @@ class FakeTask:
     def __init__(self, executors: List[TesTaskExecutor]):
         self.executors = executors
         self.state = TesTaskState.INITIALIZING
-        self.executor_logs: List[dict] = []
+        self.executor_logs: List[TesTaskExecutorLog] = []
         self.system_logs: List[str] = []
 
 
@@ -51,10 +56,15 @@ class FakeRepository:
 
 
 class FakePulsar:
-    def __init__(self, status: dict):
+    def __init__(self, status: dict, files: Dict[str, bytes]):
         self.status = status
+        self.files = files
         self.script: Optional[str] = None
         self.erased = False
+
+    async def read_job_file(self, job_id, name, tail_bytes=None):
+        content = self.files.get(name)
+        return content if content is None or tail_bytes is None else content[-tail_bytes:]
 
     async def run_job(self, task_id, script, submit_params=None):
         self.script = script
@@ -65,6 +75,63 @@ class FakePulsar:
     def erase_job(self, task_id):
         self.erased = True
         return _resolved()
+
+
+# Runs a container command on the host: skips `run`, the --option=value flags and the image.
+DOCKER_STUB = """#!/bin/sh
+shift
+while [ "${1#--}" != "$1" ]; do shift; done
+shift
+exec "$@"
+"""
+
+
+class ScriptPulsar(FakePulsar):
+    """Runs the submitted job script with bash in ``workdir`` (standing in for the job's working directory), followed by
+    Pulsar's return-code capture, with a ``docker`` stub that runs the container command on the host; answers the
+    status and file requests from that directory."""
+
+    def __init__(self, workdir: Path, kill_when: Optional[str] = None):
+        """``kill_when``: a file name; once the job writes it, the whole job is killed with SIGKILL, as SLURM does at
+        the job's time or memory limit (Pulsar's return-code capture then never runs)."""
+        super().__init__({}, {})
+        self.workdir = workdir
+        self.kill_when = kill_when
+        self.result: Optional[subprocess.CompletedProcess] = None
+
+    async def run_job(self, task_id, script, submit_params=None):
+        self.script = script
+        bin_dir = self.workdir.parent / "bin"
+        bin_dir.mkdir(exist_ok=True)
+        (bin_dir / "docker").write_text(DOCKER_STUB)
+        (bin_dir / "docker").chmod(0o755)
+        env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+        args = ["bash", "-c", f"{script}; return_code=$?; echo $return_code > ../return_code;"]
+        if self.kill_when is None:
+            self.result = subprocess.run(args, cwd=self.workdir, env=env, capture_output=True, timeout=60)
+            return
+        process = subprocess.Popen(args, cwd=self.workdir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=True)
+        deadline = time.monotonic() + 30
+        while not (self.workdir / self.kill_when).exists():
+            assert process.poll() is None and time.monotonic() < deadline, "the job never wrote " + self.kill_when
+            time.sleep(0.05)
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate(timeout=30)
+        self.result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
+
+    async def job_status_complete(self, job_id, is_canceled):
+        return_code = self.workdir.parent / "return_code"
+        return {"job_id": job_id, "complete": "true", "status": "complete" if return_code.exists() else "failed",
+                # Pulsar's answer when the return_code file was never written
+                "returncode": int(return_code.read_text()) if return_code.exists() else "__unknown__",
+                "job_stdout": self.result.stdout.decode(), "job_stderr": self.result.stderr.decode(),
+                "working_directory_contents": sorted(os.listdir(self.workdir))}
+
+    async def read_job_file(self, job_id, name, tail_bytes=None):
+        path = self.workdir / name
+        content = path.read_bytes() if path.is_file() else None
+        return content if content is None or tail_bytes is None else content[-tail_bytes:]
 
 
 def import_event_actions(monkeypatch):
@@ -81,17 +148,19 @@ def import_event_actions(monkeypatch):
     return importlib.import_module('tesp_api.service.event_actions')
 
 
-def run_task(monkeypatch, status: dict, executors: List[TesTaskExecutor], input_confs: List[dict] = (),
-             output_confs: List[dict] = ()):
-    """Runs ``handle_run_task`` for one task; returns the fake task and Pulsar."""
+def run_task(monkeypatch, status: Optional[dict], executors: List[TesTaskExecutor], input_confs: List[dict] = (),
+             output_confs: List[dict] = (), files: Dict[str, bytes] = None, pulsar: FakePulsar = None):
+    """Runs ``handle_run_task`` for one task. Pulsar answers with ``status`` and ``files`` (the job's working directory
+    files), unless another ``pulsar`` is given. Returns the fake task and Pulsar."""
     event_actions = import_event_actions(monkeypatch)
     task = FakeTask(executors)
     repository = FakeRepository(task)
     monkeypatch.setattr(event_actions, 'task_repository', repository)
     monkeypatch.setattr(sys.modules['tesp_api.service.error'], 'task_repository', repository)
 
-    async def append_task_executor_logs(task_id, author, state, start, end, stdout, stderr, exit_code):
-        task.executor_logs.append({'stdout': stdout, 'stderr': stderr, 'exit_code': exit_code})
+    async def append_task_executor_logs(task_id, author, state, end, executor_logs, system_logs=()):
+        task.executor_logs.extend(executor_logs)
+        task.system_logs.extend(system_logs)
 
     async def update_last_task_log_time(*args, **kwargs):
         pass
@@ -99,7 +168,7 @@ def run_task(monkeypatch, status: dict, executors: List[TesTaskExecutor], input_
     monkeypatch.setattr(event_actions, 'append_task_executor_logs', append_task_executor_logs)
     monkeypatch.setattr(event_actions, 'update_last_task_log_time', update_last_task_log_time)
 
-    pulsar = FakePulsar(status)
+    pulsar = pulsar or FakePulsar(status, files or {})
     payload = {
         'task_id': 'abc', 'author': 'someone', 'resource_conf': {}, 'volume_confs': [],
         'input_confs': list(input_confs), 'output_confs': list(output_confs), 'pulsar_operations': pulsar,

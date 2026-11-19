@@ -7,10 +7,11 @@ for Pulsar's job working directory (the script writes marker files there).
 """
 import shlex
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from tesp_api.utils.job_script import job_script
+from tesp_api.utils.job_script import executor_file, job_script
 
 
 @pytest.fixture(autouse=True)
@@ -37,8 +38,10 @@ def test_script_is_not_traced():
     )
     result = _run(script)
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "hi\n"
+    assert result.stdout == ""
     assert result.stderr == ""
+    assert Path(executor_file(0, "stdout")).read_text() == "hi\n"
+    assert Path(executor_file(0, "stderr")).read_text() == ""
 
 
 def test_failing_stage_ends_the_job_with_its_exit_code():
@@ -48,7 +51,8 @@ def test_failing_stage_ends_the_job_with_its_exit_code():
 
 
 def test_stages_run_in_order():
-    result = _run(job_script("echo 1", "echo 2", "echo 3"))
+    # Executors' output goes to their own files (issue #67); the stage output stays on the job's streams.
+    result = _run(job_script("echo 1", "echo 2 >> order", "echo 3 >> order", "cat order"))
     assert result.returncode == 0, result.stderr
     assert result.stdout == "1\n2\n3\n"
 

@@ -152,6 +152,18 @@ def test_missing_input_is_system_error():
     assert task_log["logs"] == []
     assert any("stage-in failed (exit code 22)" in log for log in task_log["system_logs"])
 
+# Issue #67: one executor log per executor, each with its own streams and exit code.
+def test_one_log_per_executor():
+    task = {"executors": [
+        {"image": "ubuntu", "command": ["sh", "-c", "echo step1 > /shared/s1"]},
+        {"image": "ubuntu", "command": ["sh", "-c", "cat /shared/s1; echo step2; echo warn >&2; exit 4"]},
+    ], "volumes": ["/shared"]}
+    task_id = _gnv(_post_request("/v1/tasks", payload=task).json(), "id")
+    assert _wait_for_state(task_id, "EXECUTOR_ERROR", 120)
+    [task_log] = _get_request(f"/v1/tasks/{task_id}?view=FULL")["logs"]
+    assert [(log["stdout"], log["stderr"], log["exit_code"]) for log in task_log["logs"]] == \
+           [("", "", 0), ("step1\nstep2\n", "warn\n", 4)]
+
 # Issue #64: a failing last stage (here the only executor, no outputs) keeps its exit code.
 def test_failing_last_executor_keeps_exit_code():
     task = {"executors": [{"image": "ubuntu", "command": ["sh", "-c", "echo before-fail; exit 3"]}]}
@@ -222,12 +234,11 @@ def test_outputs():
     _assert_skipped(task_id, ["/data/http_out/outputs_http_missing.txt", "/data/http_out/outputs_http_missing_dir"])
 
 def _assert_skipped(task_id, paths):
-    """The stage-out script reports each skipped output on a line of its own in the task's stderr."""
+    """The stage-out script reports each skipped output, which ends up in the task's system logs (issue #67)."""
     task = _get_request(f"/v1/tasks/{task_id}?view=FULL")
-    stderr_lines = [line for log in task["logs"] for executor_log in log["logs"]
-                    for line in (executor_log.get("stderr") or "").splitlines()]
+    system_logs = [line for log in task["logs"] for line in log.get("system_logs") or []]
     for path in paths:
-        assert f"tesp-api: output {path} not found, skipped" in stderr_lines, path
+        assert f"tesp-api: output {path} not found, skipped" in system_logs, path
 
 # Downloads and copies file to the shared volume and displays its content with two separate executors.
 def test_volumes():
