@@ -9,7 +9,7 @@ from urllib.parse import quote
 from pymonad.maybe import Maybe, Nothing
 from bson.objectid import ObjectId
 from pymonad.promise import Promise
-from aiohttp import ClientSession, ClientError, ClientResponseError, TraceRequestStartParams
+from aiohttp import ClientSession, ClientTimeout, ClientError, ClientResponseError, TraceRequestStartParams
 from loguru import logger
 
 from tesp_api.repository.model.task import TesTaskIOType
@@ -45,6 +45,23 @@ def _error_message(error: Exception) -> str:
     # aiohttp's ClientResponseError names the request URL, and that may hold the job command line. The type is named
     # because the wrapped error is hidden from tracebacks, and some (asyncio.TimeoutError) have no message.
     return f'{type(error).__name__}: {redact_presigned_urls(str(error))}'
+
+
+async def _read_tail(response, size: int) -> bytes:
+    """The last ``size`` bytes of a response body, read in chunks so that a large body is never held whole."""
+    tail = b""
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        tail = (tail + chunk)[-size:]
+    return tail
+
+
+def _request_timeout(client: ClientSession, response_type) -> dict:
+    """A tail read may download a large file (a killed executor's streams are not cut): the session's timeout then
+    applies per connect and per read, not to the whole download."""
+    if not (isinstance(response_type, tuple) and response_type[0] == 'TAIL'):
+        return {}
+    limit = getattr(getattr(client, 'timeout', None), 'total', None)
+    return {'timeout': ClientTimeout(total=None, sock_connect=limit, sock_read=limit)}
 
 
 class DataType(str, Enum):
@@ -90,9 +107,10 @@ class PulsarOperations(ABC):
 
     @abstractmethod
     async def _pulsar_request(self, path: str, method: Literal['GET', 'POST', 'PUT', 'DELETE'],
-                              response_type: Literal['JSON', 'BYTES'], params=None, data=None,
+                              response_type, params=None, data=None,
                               raise_for_status: bool = False):
-        """A request to Pulsar's REST API; ``raise_for_status`` turns 4xx/5xx answers into errors."""
+        """A request to Pulsar's REST API; ``raise_for_status`` turns 4xx/5xx answers into errors. ``response_type``
+        is 'JSON', 'BYTES' or ('TAIL', n): the last n bytes of the body."""
 
     @abstractmethod
     def erase_job(self, task_id: ObjectId): pass
@@ -117,12 +135,29 @@ class PulsarOperations(ABC):
             raise PulsarOperationsError(ValueError(f'unexpected job status answer of type {type(status).__name__}'))
         return status
 
-    async def job_status_complete(self, job_id: str, is_canceled: Callable[[], Awaitable[bool]]) -> dict:
-        """Waits for the job to finish and returns its Pulsar status (see ``poll_until_complete``).
+    async def job_status_complete(self, job_id: str, is_canceled: Callable[[], Awaitable[bool]],
+                                  on_started: Optional[Callable[[], Awaitable[None]]] = None) -> dict:
+        """Waits for the job to finish and returns its Pulsar status (see ``poll_until_complete``); ``on_started`` is
+        awaited once the job has left the batch system's queue.
 
         Both implementations read the status from Pulsar's REST API."""
         return await poll_until_complete(lambda: self._job_status(job_id), is_canceled, self.status_polling,
-                                         is_transient=is_transient_pulsar_error, job_id=job_id)
+                                         is_transient=is_transient_pulsar_error, job_id=job_id,
+                                         on_started=on_started)
+
+    async def read_job_file(self, job_id: str, name: str, tail_bytes: Optional[int] = None) -> Optional[bytes]:
+        """A file in the job's working directory (where its command line runs), or None when there is no such file;
+        with ``tail_bytes``, only its last ``tail_bytes`` bytes are kept in memory. Both implementations read it from
+        Pulsar's REST API."""
+        try:
+            return await self._pulsar_request(path=f'/jobs/{job_id}/files', method='GET',
+                                              response_type='BYTES' if tail_bytes is None else ('TAIL', tail_bytes),
+                                              params={'name': name, 'type': 'output_workdir'},
+                                              raise_for_status=True)
+        except PulsarLayerConnectionError as error:
+            if error.http_status == 404:
+                return None
+            raise
 
     @abstractmethod
     def upload(self, job_id: ObjectId, io_type: TesTaskIOType, file_path: str, file_content: Maybe[str]): pass
@@ -144,16 +179,18 @@ class PulsarRestOperations(PulsarOperations):
             case _ as any_error: raise PulsarOperationsError(any_error)
 
     async def _pulsar_request(self, path: str, method: Literal['GET', 'POST', 'PUT', 'DELETE'],
-                              response_type: Literal['JSON', 'BYTES'], params=None, data=None,
+                              response_type, params=None, data=None,
                               raise_for_status: bool = False):
         try:
             async with self.pulsar_client.request(
-                    url=f'{self.base_url}{path}', method=method, params=params, data=data) as response:
+                    url=f'{self.base_url}{path}', method=method, params=params, data=data,
+                    **_request_timeout(self.pulsar_client, response_type)) as response:
                 if raise_for_status:
                     response.raise_for_status()
                 match response_type:
                     case 'JSON': return await response.json(content_type='text/html')
                     case 'BYTES': return await response.read()
+                    case ('TAIL', int(size)): return await _read_tail(response, size)
                     case _ as value: raise ValueError(f'Got unexpected value [{value}] for response_type parameter')
         except (ClientError, asyncio.TimeoutError) as err:
             raise PulsarLayerConnectionError(err)
@@ -230,16 +267,18 @@ class PulsarAmqpOperations(PulsarOperations):
             case _ as any_error: raise PulsarOperationsError(any_error)
 
     async def _pulsar_request(self, path: str, method: Literal['GET', 'POST', 'PUT', 'DELETE'],
-                              response_type: Literal['JSON', 'BYTES'], params=None, data=None,
+                              response_type, params=None, data=None,
                               raise_for_status: bool = False):
         try:
             async with self.pulsar_client.request(
-                    url=f'{self.base_url}{path}', method=method, params=params, data=data) as response:
+                    url=f'{self.base_url}{path}', method=method, params=params, data=data,
+                    **_request_timeout(self.pulsar_client, response_type)) as response:
                 if raise_for_status:
                     response.raise_for_status()
                 match response_type:
                     case 'JSON': return await response.json(content_type='text/html')
                     case 'BYTES': return await response.read()
+                    case ('TAIL', int(size)): return await _read_tail(response, size)
                     case _ as value: raise ValueError(f'Unexpected response_type: {value}')
         except (ClientError, asyncio.TimeoutError) as err:
             raise PulsarLayerConnectionError(err)

@@ -209,8 +209,11 @@ do not load Pulsar.
 | `pulsar.status.max_wait_seconds` | `TESP_API_PULSAR__STATUS__MAX_WAIT_SECONDS` | `0` | Longest a job may queue and run, in seconds; `0` means no limit. Past it `TESP API` asks Pulsar to cancel the job and the task ends in `SYSTEM_ERROR` with the reason in its system logs |
 | `pulsar.status.error_retry_seconds` | `TESP_API_PULSAR__STATUS__ERROR_RETRY_SECONDS` | `600` | How long connection errors, timeouts and 5xx/429 answers from Pulsar are retried before the task ends in `SYSTEM_ERROR`; a good answer starts the count again. `0` disables retries |
 
-A job that never finishes in Pulsar (e.g. a batch job pending on resources the cluster cannot provide) keeps its task
-`RUNNING` until it is canceled, unless `max_wait_seconds` is set. Other answers from Pulsar (4xx, a malformed status)
+A task stays `INITIALIZING` while Pulsar reports its job `queued` (e.g. a SLURM job pending behind other jobs) and
+becomes `RUNNING` at the first status request that finds the job running or finished; its log and executor log
+`start_time` is that moment, so queue time is not counted as run time. A job that never leaves the queue (e.g. pending
+on resources the cluster cannot provide) keeps its task `INITIALIZING` until it is canceled, unless
+`max_wait_seconds` is set (which counts queue time too). Other answers from Pulsar (4xx, a malformed status)
 end the task in `SYSTEM_ERROR` at once.
 
 `pulsar.status.max_polls` is deprecated and ignored (it used to fail every task still running after
@@ -219,6 +222,33 @@ end the task in `SYSTEM_ERROR` at once.
 Canceling a task (`POST /v1/tasks/{id}:cancel`) is noticed at the next status request, which then stops and cancels
 the Pulsar job, so it can take up to `max_poll_interval` seconds. Tasks with S3 outputs must also finish within
 `s3.output_presign_expiry_seconds`, see below.
+
+A task ends in `EXECUTOR_ERROR` when an executor exits with a non-zero code. When downloading the inputs (stage-in) or
+uploading the outputs (stage-out) fails, or Pulsar or the batch system does not start the job (for example, SLURM
+rejects a `ram_gb` no node has), the task ends in `SYSTEM_ERROR` instead, with the reason and the end of the stage's
+output in `logs[].system_logs` (`view=FULL`). Executors that did not run get no executor log.
+
+Each executor that ran gets its own entry in `logs[].logs`, in order, with its own `stdout` and `stderr` (the last
+64 KiB of each), `exit_code`, `start_time` and `end_time`. Output of the stage-in and stage-out containers is not part
+of them; their notes (e.g. an output that was not found) go to `logs[].system_logs`. An executor that the batch system
+or Pulsar stopped while it ran (for example, when the SLURM job reached its time limit) keeps its log with what it
+wrote until then, but without `exit_code` and `end_time`, and a note in `logs[].system_logs` says so; the task ends in
+`EXECUTOR_ERROR`. An executor killed for using too much memory usually gets exit code 137 instead, as the kernel kills
+only its processes. A task canceled through tesp-api gets no executor logs for the executors still running.
+
+#### Restarts
+A Pulsar job goes on when `TESP API` stops or restarts (a redeploy, a crash), and so does its task. Each `TESP API`
+process (each gunicorn worker) holds a lease on the tasks it works on, renewed every 45 seconds and kept in the task
+document. Once a lease expires, at once after a clean shutdown and within 3 minutes after a crash, the first process to
+claim the task takes it over, so each task is taken over by one process only:
+
+* a task whose job was submitted to Pulsar is waited for again and ends as usual, with its executor logs. That holds
+  for an `INITIALIZING` task whose job waits in the batch system's queue too: it becomes `RUNNING` once the job runs;
+* a task still `QUEUED`, or `INITIALIZING` and not yet submitted, ends in `SYSTEM_ERROR` with a system log saying it
+  was not run, and what Pulsar holds for it is erased. Submit it again;
+* a task canceled while no process waited for it gets its Pulsar job canceled.
+
+The Pulsar job id is the task id, so this needs the same Pulsar (and its job directories) after the restart.
 
 &nbsp;
 ### S3 inputs and outputs
@@ -417,13 +447,13 @@ longer configured to redirect stdout into the file.
 | _Pulsar_ | `TESP API` should be able to dispatch executions to multiple `Pulsar` services via different types of `Pulsar` interfaces. Currently, only one `Pulsar` service is supported       |
 | _Pulsar_ | `Pulsar` must be "polled" for job state. Preferably `Pulsar` should notify `TESP API` about state change. This is already default behavior when using `Pulsar` with message queues |
 | _TES_    | Canceling a `TES` task calls Pulsar's cancel endpoint at the next status request (see [Waiting for Pulsar jobs](#waiting-for-pulsar-jobs)) but container termination depends on Pulsar/runtime behavior. In-flight tasks may still complete. |
-| _TES_    | Waiting for Pulsar jobs happens in the `TESP API` process and is not resumed when it starts again. Tasks that are queued, initializing or running when it stops or restarts never get their logs or final state: currently, after a clean shutdown they show `CANCELED` (the shutdown handler fails before it cancels their Pulsar jobs), after a crash they keep their state, and in both cases their Pulsar jobs go on. |
+| _TES_    | Tasks that are `QUEUED` when `TESP API` stops, or `INITIALIZING` but not yet submitted to Pulsar, end in `SYSTEM_ERROR` (see [Restarts](#restarts)); they are not resubmitted. Waiting for submitted jobs is resumed. |
 | _TES_    | Only `cpu_cores` and `ram_gb` are used, as container runtime flags and/or a batch-system native specification (see [Task resources](#task-resources-cpu-and-memory)); with the default settings they are not enforced for `singularity`. Other resource fields (disk, preemptible, zones) are stored but not enforced. |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
-| _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's stderr) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
+| _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's `logs[].system_logs`) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
 | _TES_    | Outputs are uploaded to `s3://` URLs and to HTTP(S) upload endpoints (multipart `POST`, form field `file`). Other URLs, such as the `ftp://` output in the example above, get the same `curl` multipart `POST`, which is not an FTP upload, so FTP outputs do not work. |
-| _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's stderr). |
+| _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's `logs[].system_logs`). |
 | _TES_    | Output paths must be absolute. Wildcards (`*`, `?`; TES 1.1 `path_prefix` outputs) are not supported and are refused with `400 Bad Request`. |
 | _TES_    | When an executor sets `stdin`, `stdout` or `stderr`, its image must provide `sh`. `logs.logs.stdout`/`stderr` then hold the last 64 KiB of each redirected stream, filtered to printable ASCII, so non-ASCII text is dropped from the log (the file keeps the exact bytes); without `tail`/`tr` in the image the log copy is empty. |
 
