@@ -44,10 +44,19 @@ def test_script_is_not_traced():
     assert Path(executor_file(0, "stderr")).read_text() == ""
 
 
-def test_failing_stage_ends_the_job_with_its_exit_code():
-    result = _run(job_script("echo stage-in", "sh -c 'exit 3'", "echo stage-out"))
+def test_failing_executor_ends_the_job_with_its_exit_code_after_stage_out():
+    # Stage-out runs after a failed executor (issue #30); the job still ends with the executor's code.
+    result = _run(job_script("echo stage-in", "sh -c 'exit 3'", "echo not-reached >> order", "echo stage-out"))
     assert result.returncode == 3
+    assert result.stdout == "stage-in\nstage-out\n"
+    assert not Path("order").exists()
+
+
+def test_failing_stage_in_ends_the_job_before_the_executors():
+    result = _run(job_script("sh -c 'echo stage-in; exit 4'", "echo executor > ran", "echo stage-out"))
+    assert result.returncode == 4
     assert result.stdout == "stage-in\n"
+    assert not Path("ran").exists()
 
 
 def test_stages_run_in_order():
@@ -78,3 +87,31 @@ def test_pulsar_captures_exit_code_of_failing_earlier_stage(tmp_path):
 
 def test_pulsar_captures_exit_code_of_successful_job(tmp_path):
     assert _run_as_pulsar(job_script("echo stage-in", "echo executor", "echo stage-out"), tmp_path) == "0"
+
+
+# Issue #30: stage-out runs after a failed executor. Under SLURM, Pulsar's queued_drmaa manager appends its return-code
+# capture (pulsar/managers/base/directory.py: "; return_code=$?; echo $return_code > <dir>/return_code;") to the
+# command line in the same shell, so the job script's own `exit` must stay inside its subshell.
+
+@pytest.mark.parametrize("shell", ["bash", "sh"])
+@pytest.mark.parametrize("executors, stage_out, return_code, uploaded, marker", [
+    # A failed executor: outputs uploaded, its exit code kept, no stage marker (EXECUTOR_ERROR).
+    (["sh -c 'echo partial > out; exit 3'", "echo not-reached > second"], "cp out uploaded", "3", True, False),
+    # The executors succeeded and stage-out failed: its code and the stage-out marker (SYSTEM_ERROR).
+    (["echo done > out"], "sh -c 'exit 7'", "7", False, True),
+    # Both failed: the executor's code, no marker, a note on stderr.
+    (["sh -c 'exit 3'"], "sh -c 'exit 7'", "3", False, False),
+    # All good.
+    (["echo done > out"], "cp out uploaded", "0", True, False),
+])
+def test_pulsar_queued_drmaa_captures_the_exit_code_after_stage_out(tmp_path, shell, executors, stage_out,
+                                                                    return_code, uploaded, marker):
+    from tesp_api.utils.job_script import STAGE_FAILED_FILES, STAGE_OUT_FAILED_NOTE
+    rc_path = tmp_path / "return_code"
+    command_line = f"{job_script('', *executors, stage_out)}; return_code=$?; echo $return_code > {rc_path};"
+    result = subprocess.run([shell, "-c", command_line], capture_output=True, text=True, timeout=30)
+    assert rc_path.read_text() == f"{return_code}\n"
+    assert Path("uploaded").exists() is uploaded
+    assert Path(STAGE_FAILED_FILES["stage-out"]).exists() is marker
+    assert not Path("second").exists()
+    assert (STAGE_OUT_FAILED_NOTE in result.stderr) is (return_code == "3" and not uploaded)

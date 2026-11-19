@@ -49,8 +49,9 @@ def test_each_executor_gets_its_own_streams_and_exit_code(shell, in_job_working_
                              "sh -c 'echo step2; exit 3'",
                              "echo not-reached",
                              "echo stage-out"), shell)
-    # The job's own streams keep only the stage output; the job ends with the failed executor's code.
-    assert result.stdout == ""
+    # The job's own streams keep only the stage output; stage-out runs after the failed executor (issue #30), and the
+    # job ends with the failed executor's code.
+    assert result.stdout == "stage-out\n"
     assert result.stderr == "stage-in-note\n"
     assert Path("return_code").read_text() == "3\n"
     assert (_file(0, "stdout"), _file(0, "stderr"), _file(1, "stdout"), _file(1, "stderr")) == \
@@ -151,7 +152,8 @@ def test_task_gets_one_log_per_executor(monkeypatch, tmp_path):
     assert [(log.stdout, log.stderr, log.exit_code) for log in task.executor_logs] == \
            [("step1\n", "", 0), ("step2\n", "oops\n", 5)]
     assert all(log.start_time <= log.end_time for log in task.executor_logs)
-    assert task.system_logs == []  # stage-out did not run after the failed executor
+    # Stage-out ran after the failed executor (issue #30) and noted the missing output.
+    assert task.system_logs == [f"tesp-api: output {tmp_path}/missing.txt not found, skipped"]
 
 
 def test_stage_notes_go_to_system_logs(monkeypatch, tmp_path):

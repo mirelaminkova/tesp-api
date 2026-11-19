@@ -51,7 +51,7 @@ def test_later_error_still_fails_the_job(in_job_working_directory):
                         ignore_errors=[True, False, False])
     assert _run(script) == "5"
     assert _exit_codes(3) == [3, 5, None]
-    assert not Path("stage-out").exists()
+    assert Path("stage-out").exists()  # outputs are uploaded after a failed executor too (issue #30)
 
 
 def test_flags_follow_executor_positions(in_job_working_directory):

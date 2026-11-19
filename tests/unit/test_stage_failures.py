@@ -54,7 +54,7 @@ def test_failing_stage_out_is_marked(tmp_path):
 
 def test_failing_executor_is_not_a_stage_failure(tmp_path):
     result = _run(job_script("echo stage-in", "sh -c 'exit 3'", "echo executor-2", "echo stage-out"), tmp_path)
-    assert result.stdout == "stage-in\n"
+    assert result.stdout == "stage-in\nstage-out\n"  # stage-out runs after the failed executor (issue #30)
     assert (tmp_path / "return_code").read_text() == "3\n"
     assert failed_stage(_status(tmp_path)) is None
 

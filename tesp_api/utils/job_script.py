@@ -18,6 +18,10 @@ STAGE_FAILED_FILES = {"stage-in": "tesp-stage-in-failed", "stage-out": "tesp-sta
 EXECUTOR_FILE = "tesp-executor-{index}.{kind}"
 EXECUTOR_LOG_TAIL_BYTES = 64 * 1024
 
+# Note on the job's stderr (and so in the task's system logs) when stage-out fails after a failed executor: the task
+# ends in EXECUTOR_ERROR for the executor, and this says the outputs may be missing too.
+STAGE_OUT_FAILED_NOTE = "tesp-api: uploading the outputs after the failed executor failed too; some outputs are missing"
+
 # Lines and characters of the job's stderr quoted in the system log of a failed stage
 SYSTEM_LOG_TAIL_LINES = 20
 SYSTEM_LOG_TAIL_CHARS = 4096
@@ -50,9 +54,13 @@ def job_script(*commands: Optional[str], ignore_errors: Sequence[bool] = ()) -> 
     """
     Joins the job's stage commands into the script submitted to Pulsar, or returns ``None`` when there is nothing to
     run. ``commands`` are the stage-in command, the executor commands in order, then the stage-out command; an empty
-    one is skipped. The first failing stage ends the job with its exit code. A failing stage-in or stage-out also
-    leaves a marker file (``STAGE_FAILED_FILES``), so the task can end in SYSTEM_ERROR rather than EXECUTOR_ERROR
-    (issue #66, see ``failed_stage``). Each executor's streams and exit code go to files (``executor_file``); the
+    one is skipped. A failing stage-in ends the job with its exit code. The executors run in order until one fails
+    (unless it has ``ignore_error``). Stage-out runs either way, so the outputs a failed executor left (e.g.
+    Nextflow's ``.exitcode`` and ``.command.err``) are still uploaded (issue #30); the job then ends with the failed
+    executor's exit code, so the task still ends in EXECUTOR_ERROR. A failing stage-in, or a failing stage-out after
+    successful executors, also leaves a marker file (``STAGE_FAILED_FILES``), so the task can end in SYSTEM_ERROR
+    rather than EXECUTOR_ERROR (issue #66, see ``failed_stage``); a stage-out that fails after a failed executor only
+    leaves a note on the job's stderr (``STAGE_OUT_FAILED_NOTE``). Each executor's streams and exit code go to files (``executor_file``); the
     job's own stdout and stderr hold only the stage-in and stage-out output. ``ignore_errors[i]`` is executor ``i``'s
     ``ignore_error`` (TES 1.1): when set, a failure of that executor does not stop the job (issue #23).
 
@@ -82,10 +90,19 @@ def job_script(*commands: Optional[str], ignore_errors: Sequence[bool] = ()) -> 
         script.append(stage(stage_in, "stage-in"))
     if executors:
         script.append(_EXECUTOR_END)
+        # The failed executor's exit code is kept for the end of the job, after stage-out (issue #30).
+        script.append("tesp_rc=0")
         script.append(" && ".join(_executor(i, c, i < len(ignore_errors) and bool(ignore_errors[i]))
-                                  for i, c in executors) + " || exit $?")
-    if stage_out:
+                                  for i, c in executors) + " || tesp_rc=$?")
+    if stage_out and executors:
+        marker = STAGE_FAILED_FILES["stage-out"]
+        script.append(f"( {stage_out} ) || {{ rc=$?; if [ $tesp_rc -eq 0 ]; then : > {marker}; exit $rc; fi; "
+                      f"echo \"{STAGE_OUT_FAILED_NOTE} (exit code $rc)\" >&2; }}")
+    elif stage_out:
         script.append(stage(stage_out, "stage-out"))
+    if executors:
+        # In the subshell, so Pulsar's return-code capture after the script still runs (issue #64).
+        script.append("exit $tesp_rc")
     return "( " + "; ".join(script) + " )"
 
 
