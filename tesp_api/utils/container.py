@@ -454,13 +454,14 @@ def _wildcard_upload(conf: dict, path: str, index: int) -> str:
     if conf.get('upload') == 's3_put':
         raise ValueError("wildcard outputs to S3 need a presigned POST policy for the URL prefix")
     skipped = shlex.quote(f"tesp-api: output {path} matched no files, skipped")
+    report = _output_report(index, '"$f"', '"$n"')
     # Without a match the shell leaves the pattern itself in the loop, which [ -f ] then skips.
     return (
         f"( p={shlex.quote(conf['path_prefix'])}; m=0; for f in {_glob(path)}; do "
         'if [ -L "$f" ] || { [ -e "$f" ] && [ ! -f "$f" ]; }; then '
         'echo "tesp-api: $f is not a regular file, skipped" >&2; continue; fi; '
         '[ -f "$f" ] || continue; m=1; r=${f#"$p"}; r=${r#/}; ' + _escape("f", "g") + _escape("r", "q") +
-        f"{_relative_upload(conf)} || exit 1; n=${{f##*/}}; {_output_report(index, '"$f"', '"$n"')}; done; "
+        f"{_relative_upload(conf)} || exit 1; n=${{f##*/}}; {report}; done; "
         f"[ $m = 1 ] || echo {skipped} >&2 )"
     )
 
