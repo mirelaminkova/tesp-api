@@ -346,8 +346,12 @@ async def handle_run_task(event: Event) -> None:
                 exit_code=0 if stage == "stage-out" else command_status.get('returncode', -1))]
         # logs[].outputs (issue #31): what stage-out reported uploading, from the task's own output_confs (s3:// URLs,
         # not presigned ones). Also after a failed stage-out, for the files it uploaded before.
+        # Not after a job killed during an executor (no exit code): stage-out never ran, and the job script never
+        # removed a report file that executor may have written.
+        stage_out_may_have_run = not killed and isinstance(command_status.get('returncode'), int)
         output_logs = output_file_logs(
-            await read_stage_out_report(pulsar_operations, str(task_id), command_status), output_confs)
+            await read_stage_out_report(pulsar_operations, str(task_id), command_status), output_confs) \
+            if stage_out_may_have_run else []
         await append_task_executor_logs(task_id, author, TesTaskState.RUNNING, command_end_time, executor_logs, notes,
                                         output_logs)
 

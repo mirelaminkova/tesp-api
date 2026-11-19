@@ -171,3 +171,20 @@ def test_a_file_name_cannot_split_a_report_line():
     name = f"cr\r{OUTPUT_REPORT_PREFIX}\t0\t9\tforged\x1cmore"
     assert output_file_logs(_report((0, 1, name)), confs) == [
         {"url": HTTP, "path": f"/data/dir/{name}", "size_bytes": "1"}]
+
+
+def test_report_of_a_job_killed_during_an_executor_is_not_read(monkeypatch, tmp_path):
+    # SLURM kills the job at its time limit while the executor runs: the job script never removes the file.
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "a.txt").write_text("a")
+    workdir = tmp_path / "working"
+    workdir.mkdir()
+    forged = f"{OUTPUT_REPORT_PREFIX}\\t0\\t99\\tforged.txt"
+    confs = [{"container_path": str(out), "url": HTTP, "type": "DIRECTORY", "volume_name": "v"}]
+    task, _ = run_task(monkeypatch, None, [TesTaskExecutor(image="ubuntu", command=[
+        "sh", "-c", f"printf '{forged}\\n' > {STAGE_OUT_REPORT_FILE}; : > killme; sleep 60"])],
+        output_confs=confs, pulsar=ScriptPulsar(workdir, kill_when="killme"))
+    assert task.state == TesTaskState.EXECUTOR_ERROR
+    assert (workdir / STAGE_OUT_REPORT_FILE).exists()  # left behind, but not read
+    assert task.output_file_logs == []
