@@ -233,7 +233,7 @@ async def handle_run_task(event: Event) -> None:
                 volume_confs=volume_confs, input_confs=input_confs, output_confs=output_confs,
                 inputs_directory=stage_in_mount, container_type=CONTAINER_TYPE,
                 job_directory=payload['task_config'].get('job_directory') if CONTAINER_TYPE == "singularity" else None,
-                executor_index=i
+                executor_index=i, writable_tmpfs=resource_config.writable_tmpfs
             )
             container_cmds.append(run_cmd)
 

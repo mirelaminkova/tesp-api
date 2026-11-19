@@ -300,6 +300,12 @@ directories of `outputs`. The overlay is a tmpfs limited by `sessiondir max size
 default); larger scratch data should go to `/tmp`, a volume or an output directory, or the limit must be raised on the
 batch nodes.
 
+`--writable-tmpfs` needs `enable overlay = yes` in `apptainer.conf` on the nodes that run the jobs. That is Apptainer's
+default, but where an administrator has set `enable overlay = no` every Singularity task fails. Turn the overlay off
+there with `container.writable_tmpfs = false` (`TESP_API_CONTAINER__WRITABLE_TMPFS=false`); executors then get a
+read-only container filesystem again (no new files next to their inputs, no new top-level directories) and can write
+only to volumes, output directories and the directories Apptainer binds by default, such as `/tmp`.
+
 &nbsp;
 ### Configuring required services
 You can have a look at [./docker-compose.yaml](https://github.com/CESNET/tesp-api/blob/main/docker-compose.yaml) to see how

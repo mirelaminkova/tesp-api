@@ -23,6 +23,10 @@ pulsar.native_specification.ram_gb = ""     # e.g. "--mem={ram_mib}" for SLURM
 # "auto" for docker only, "always" for docker and singularity, "never" for neither. Apptainer needs a usable cgroups
 # manager (cgroups v2 with systemd or delegation) for these flags and fails the task without one.
 container.resource_limits = "auto"
+# Run singularity executors with --writable-tmpfs, so they can write anywhere in the container as with docker (writes
+# are discarded when the executor ends). Needs "enable overlay = yes" (Apptainer's default) in apptainer.conf on the
+# nodes that run the jobs; set false where overlay is disabled, or every singularity task fails.
+container.writable_tmpfs = true
 
 logging.level = "DEBUG"
 logging.output_json = false
