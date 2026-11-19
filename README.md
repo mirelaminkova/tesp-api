@@ -224,8 +224,9 @@ A task ends in `EXECUTOR_ERROR` when an executor exits with a non-zero code. Whe
 uploading the outputs (stage-out) fails, or Pulsar or the batch system does not start the job (for example, SLURM
 rejects a `ram_gb` no node has), the task ends in `SYSTEM_ERROR` instead, with the reason and the end of the stage's
 output in `logs[].system_logs` (`view=FULL`). Executors that did not run get no executor log. The outputs are uploaded
-also after a failed executor, and the task ends in `EXECUTOR_ERROR`; if that upload fails too, a note in
-`logs[].system_logs` says so.
+also after a failed executor, and the task ends in `EXECUTOR_ERROR`. Outputs the failed executor did not write are
+skipped with a note, and if an upload fails, the other outputs are still tried and a note says so; with a Pulsar that
+lists the job's working directory these notes are in `logs[].system_logs`, else in the executor log's `stderr`.
 
 Each executor that ran gets its own entry in `logs[].logs`, in order, with its own `stdout` and `stderr` (the last
 64 KiB of each), `exit_code`, `start_time` and `end_time`. Output of the stage-in and stage-out containers is not part

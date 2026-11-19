@@ -115,3 +115,44 @@ def test_pulsar_queued_drmaa_captures_the_exit_code_after_stage_out(tmp_path, sh
     assert Path(STAGE_FAILED_FILES["stage-out"]).exists() is marker
     assert not Path("second").exists()
     assert (STAGE_OUT_FAILED_NOTE in result.stderr) is (return_code == "3" and not uploaded)
+
+
+def test_stage_out_tries_every_output_before_it_fails(tmp_path):
+    # After a failed executor an output can be left in a bad state (here a file where a DIRECTORY is declared); the
+    # outputs after it must still be tried (issue #30).
+    from tesp_api.utils.container import stage_out_script
+    (tmp_path / "not-a-dir").write_text("x")
+    script = stage_out_script([
+        {"container_path": str(tmp_path / "not-a-dir"), "url": "http://127.0.0.1:9/up", "type": "DIRECTORY"},
+        {"container_path": str(tmp_path / "missing"), "url": "http://127.0.0.1:9/up", "type": "FILE"}])
+    result = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert f"tesp-api: uploading output {tmp_path}/not-a-dir failed" in result.stderr
+    assert f"tesp-api: output {tmp_path}/missing not found, skipped" in result.stderr
+
+
+@pytest.mark.parametrize("shell", ["bash", "sh"])
+def test_ignored_failure_then_stage_out(tmp_path, shell):
+    # ignore_error: the job goes on and ends with 0 after stage-out; a failing stage-out is then a stage failure.
+    from tesp_api.utils.job_script import STAGE_FAILED_FILES
+    for stage_out, return_code, marker in [("echo up > uploaded", "0", False), ("sh -c 'exit 7'", "7", True)]:
+        for name in ("uploaded", STAGE_FAILED_FILES["stage-out"]):
+            Path(name).unlink(missing_ok=True)
+        assert _run_as_pulsar_with(shell, job_script("", "sh -c 'exit 3'", stage_out, ignore_errors=[True]),
+                                   tmp_path) == return_code
+        assert Path(STAGE_FAILED_FILES["stage-out"]).exists() is marker
+
+
+@pytest.mark.parametrize("shell", ["bash", "sh"])
+def test_failing_executor_without_outputs(tmp_path, shell):
+    assert _run_as_pulsar_with(shell, job_script("echo stage-in", "sh -c 'exit 3'", "echo not-reached > ran", ""),
+                               tmp_path) == "3"
+    assert not Path("ran").exists()
+
+
+def _run_as_pulsar_with(shell: str, script: str, tmp_path) -> str:
+    rc_path = tmp_path / "return_code"
+    rc_path.unlink(missing_ok=True)
+    subprocess.run([shell, "-c", f"{script}; return_code=$?; echo $return_code > {rc_path};"], capture_output=True,
+                   timeout=30)
+    return rc_path.read_text().strip()

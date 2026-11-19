@@ -59,10 +59,11 @@ def job_script(*commands: Optional[str], ignore_errors: Sequence[bool] = ()) -> 
     Nextflow's ``.exitcode`` and ``.command.err``) are still uploaded (issue #30); the job then ends with the failed
     executor's exit code, so the task still ends in EXECUTOR_ERROR. A failing stage-in, or a failing stage-out after
     successful executors, also leaves a marker file (``STAGE_FAILED_FILES``), so the task can end in SYSTEM_ERROR
-    rather than EXECUTOR_ERROR (issue #66, see ``failed_stage``); a stage-out that fails after a failed executor only
-    leaves a note on the job's stderr (``STAGE_OUT_FAILED_NOTE``). Each executor's streams and exit code go to files (``executor_file``); the
-    job's own stdout and stderr hold only the stage-in and stage-out output. ``ignore_errors[i]`` is executor ``i``'s
-    ``ignore_error`` (TES 1.1): when set, a failure of that executor does not stop the job (issue #23).
+    rather than EXECUTOR_ERROR (issue #66, see ``failed_stage``); a stage-out that fails after a failed executor
+    only leaves a note on the job's stderr (``STAGE_OUT_FAILED_NOTE``). Each executor's streams and exit code go to
+    files (``executor_file``); the job's own stdout and stderr hold only the stage-in and stage-out output.
+    ``ignore_errors[i]`` is executor ``i``'s ``ignore_error`` (TES 1.1): when set, a failure of that executor does
+    not stop the job (issue #23).
 
     The script runs in a subshell. Pulsar appends ``; return_code=$?; echo $return_code > <job dir>/return_code`` to
     the command line, in the same shell; an ``exit`` outside a subshell would end that shell before the exit code is

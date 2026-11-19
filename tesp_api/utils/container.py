@@ -433,7 +433,8 @@ def stage_out_script(output_confs: List[dict]) -> str:
     (FILE) or presigned POST policy (DIRECTORY). DIRECTORY outputs upload every file below the directory, keeping
     their relative paths. Outputs whose path does not exist are skipped with a message on stderr: TES has no notion of
     optional outputs, and clients such as Nextflow check for missing outputs themselves. A failed upload fails the
-    script.
+    script, after the other outputs were tried: after a failed executor (issue #30), an output left in a bad state
+    must not keep the others (e.g. Nextflow's ``.exitcode``) from being uploaded.
     """
     commands = []
     for conf in output_confs:
@@ -444,8 +445,12 @@ def stage_out_script(output_confs: List[dict]) -> str:
             upload = _file_upload(conf, path)
         # Only a path that does not exist is skipped; one of the wrong type makes the upload (cd or curl) fail.
         skipped = shlex.quote(f"tesp-api: output {path} not found, skipped")
-        commands.append(f"if [ -e {shlex.quote(path)} ]; then {upload}; else echo {skipped} >&2; fi")
-    return " && ".join(commands)
+        failed = shlex.quote(f"tesp-api: uploading output {path} failed")
+        commands.append(f"if [ -e {shlex.quote(path)} ]; then {upload}; else echo {skipped} >&2; fi "
+                        f"|| {{ tesp_failed=1; echo {failed} >&2; }}")
+    if not commands:
+        return ""
+    return "; ".join(["tesp_failed=0", *commands, "[ $tesp_failed = 0 ]"])
 
 def map_volumes(job_id: str, volumes: List[str], outputs: List[TesTaskOutput]):
     output_confs: List[dict] = []
