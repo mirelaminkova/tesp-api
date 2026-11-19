@@ -12,7 +12,7 @@ import pytest
 
 from tesp_api.repository.model.task import TesTaskExecutor, TesTaskState
 from tesp_api.utils.job_script import JOB_STARTED_FILE, STAGE_FAILED_FILES, executor_file, failed_stage, \
-    job_script, stage_failure_log
+    job_script, stage_failure_log, STAGE_OUT_REPORT_FILE
 from tests.unit.run_task_stub import run_task
 
 CURL_404 = "curl: (22) The requested URL returned error: 404"
@@ -47,7 +47,8 @@ def test_failing_stage_in_skips_the_rest_and_is_marked(tmp_path):
 
 def test_failing_stage_out_is_marked(tmp_path):
     result = _run(job_script("echo stage-in", "echo executor", "echo stage-out; exit 7"), tmp_path)
-    assert result.stdout == "stage-in\nstage-out\n"  # the executor's output is in its own file (issue #67)
+    assert result.stdout == "stage-in\n"  # the executor's output is in its own file (issue #67)
+    assert (tmp_path / STAGE_OUT_REPORT_FILE).read_text() == "stage-out\n"  # the stage-out's report (issue #31)
     assert (tmp_path / "return_code").read_text() == "7\n"
     assert failed_stage(_status(tmp_path)) == "stage-out"
 
@@ -68,15 +69,16 @@ def test_failing_part_of_a_stage_list_fails_the_stage(tmp_path):
 
 def test_successful_job_leaves_only_the_start_marker(tmp_path):
     result = _run(job_script("echo 1", "", "echo 4"), tmp_path)
-    assert result.stdout == "1\n4\n"
+    assert result.stdout == "1\n"
     assert (tmp_path / "return_code").read_text() == "0\n"
-    assert sorted(os.listdir(tmp_path)) == sorted([JOB_STARTED_FILE, "return_code"])
+    assert sorted(os.listdir(tmp_path)) == sorted([JOB_STARTED_FILE, STAGE_OUT_REPORT_FILE, "return_code"])
 
 
 def test_stage_in_and_out_only(tmp_path):
     # A two-command call is stage-in and stage-out, with no executors in between.
     result = _run(job_script("echo stage-in", "echo stage-out; exit 4"), tmp_path)
-    assert result.stdout == "stage-in\nstage-out\n"
+    assert result.stdout == "stage-in\n"
+    assert (tmp_path / STAGE_OUT_REPORT_FILE).read_text() == "stage-out\n"
     assert failed_stage(_status(tmp_path)) == "stage-out"
 
 

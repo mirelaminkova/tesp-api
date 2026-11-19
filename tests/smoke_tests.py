@@ -244,6 +244,20 @@ def test_outputs():
     assert not os.path.exists(f"{uploaded}/outputs_http_missing.txt")
     _assert_skipped(task_id, ["/data/http_out/outputs_http_missing.txt", "/data/http_out/outputs_http_missing_dir"])
 
+    # logs[].outputs lists each uploaded file, directory outputs flattened, missing outputs left out (issue #31). Every
+    # file went to the HTTP upload endpoint, so that is each one's URL.
+    assert _reported_outputs(task_id) == sorted([
+        ("/data/http_out/outputs_http_file.txt", upload_url, str(len(expected["outputs_http_file.txt"]))),
+        ("/data/http_out/results/outputs_http/top.txt", upload_url, str(len(expected["outputs_http/top.txt"]))),
+        ("/data/http_out/results/outputs_http/sub/nested.txt", upload_url,
+         str(len(expected["outputs_http/sub/nested.txt"]))),
+    ])
+
+
+def _reported_outputs(task_id):
+    task = _get_request(f"/v1/tasks/{task_id}?view=FULL")
+    return sorted((o["path"], o["url"], o["size_bytes"]) for o in task["logs"][-1].get("outputs") or [])
+
 # TES 1.1 wildcard outputs (issue #29): each match is uploaded with the path_prefix removed, here as the multipart
 # file name, which the upload server keeps below its upload root.
 def test_wildcard_outputs():
@@ -263,6 +277,9 @@ def test_wildcard_outputs():
         with open(f"{uploaded}/{name}") as f:
             assert f.read() == content, name
     assert not os.path.exists(f"{uploaded}/c-{token}.txt")
+    # Each match is in logs[].outputs (issue #31)
+    assert _reported_outputs(task_id) == sorted(
+        (f"/data/glob_out/{x}-{token}.bam", "http://172.17.0.1:5000/upload", "2") for x in "ab")
 
 def _assert_skipped(task_id, paths):
     """The stage-out script reports each skipped output, which ends up in the task's system logs (issue #67)."""
@@ -542,6 +559,14 @@ def test_s3_outputs():
     }
     _assert_skipped(task_id, ["/data/s3_out/missing.txt", "/data/s3_out/missing_dir"])
     _assert_no_s3_secrets_stored(task_id)
+
+    # logs[].outputs carries the task's s3:// URLs, the relative path of directory files percent-encoded (issue #31).
+    base = f"s3://{S3_TEST_BUCKET}/{prefix}"
+    assert [(path, url) for path, url, _ in _reported_outputs(task_id)] == sorted([
+        ("/data/s3_out/result.txt", f"{base}/result.txt"),
+        ("/data/s3_out/results/top.txt", f"{base}/results/top.txt"),
+        ("/data/s3_out/results/sub dir/nested.txt", f"{base}/results/sub%20dir/nested.txt"),
+    ])
 
 # The job script is not traced (issue #18): executor env values, presigned S3 URLs and the host container commands
 # must not show up in the task's stored stdout/stderr logs.

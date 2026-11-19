@@ -227,7 +227,14 @@ output in `logs[].system_logs` (`view=FULL`). Executors that did not run get no 
 
 Each executor that ran gets its own entry in `logs[].logs`, in order, with its own `stdout` and `stderr` (the last
 64 KiB of each), `exit_code`, `start_time` and `end_time`. Output of the stage-in and stage-out containers is not part
-of them; their notes (e.g. an output that was not found) go to `logs[].system_logs`. An executor that the batch system
+of them; their notes (e.g. an output that was not found) go to `logs[].system_logs`.
+
+`logs[].outputs` lists each file the stage-out uploaded, also those of a stage-out that failed part way: its `path`
+in the container, its `size_bytes`, and its `url`, which is the task's own URL (never a presigned one). Files of
+`DIRECTORY` outputs and of wildcard outputs are listed one by one. For S3, a directory's file gets the output's URL
+joined with its relative path (percent-encoded), which is its key; HTTP(S) upload endpoints receive every file at the
+output's URL, so that is the URL listed. Missing outputs, and files whose name contains a newline (uploaded all the
+same), are not listed. An executor that the batch system
 or Pulsar stopped while it ran (for example, when the SLURM job reached its time limit) keeps its log with what it
 wrote until then, but without `exit_code` and `end_time`, and a note in `logs[].system_logs` says so; the task ends in
 `EXECUTOR_ERROR`. An executor killed for using too much memory usually gets exit code 137 instead, as the kernel kills
@@ -433,7 +440,6 @@ longer configured to redirect stdout into the file.
 | _TES_    | Waiting for Pulsar jobs happens in the `TESP API` process and is not resumed when it starts again. Tasks that are queued, initializing or running when it stops or restarts never get their logs or final state: currently, after a clean shutdown they show `CANCELED` (the shutdown handler fails before it cancels their Pulsar jobs), after a crash they keep their state, and in both cases their Pulsar jobs go on. |
 | _TES_    | Only `cpu_cores` and `ram_gb` are used, as container runtime flags and/or a batch-system native specification (see [Task resources](#task-resources-cpu-and-memory)); with the default settings they are not enforced for `singularity`. Other resource fields (disk, preemptible, zones) are stored but not enforced. |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
-| _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
 | _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's `logs[].system_logs`) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
 | _TES_    | Outputs are uploaded to `s3://` URLs and to HTTP(S) upload endpoints (multipart `POST`, form field `file`). Other URLs, such as the `ftp://` output in the example above, get the same `curl` multipart `POST`, which is not an FTP upload, so FTP outputs do not work. |
 | _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's `logs[].system_logs`). |

@@ -10,9 +10,11 @@ from pymonad.maybe import Just, Nothing
 from bson.objectid import ObjectId
 from pymonad.promise import Promise, _Promise
 
-from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes
+from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes, \
+    output_file_logs
 from tesp_api.utils.job_script import job_script, failed_stage, stage_failure_log, executor_file, \
-    parse_executor_status, stream_text, tesp_api_notes, killed_executor_log, EXECUTOR_LOG_TAIL_BYTES
+    parse_executor_status, stream_text, tesp_api_notes, killed_executor_log, EXECUTOR_LOG_TAIL_BYTES, \
+    STAGE_OUT_REPORT_FILE
 from tesp_api.service.pulsar_service import pulsar_service
 from tesp_api.service.resources import get_resource_config
 from tesp_api.service.event_dispatcher import dispatch_event
@@ -208,6 +210,20 @@ async def read_executor_logs(pulsar_operations: PulsarOperations, job_id: str, s
     return logs, killed
 
 
+async def read_stage_out_report(pulsar_operations: PulsarOperations, job_id: str, status: dict) -> str:
+    """The stage-out's report of the files it uploaded (``STAGE_OUT_REPORT_FILE``), or "" when there is none."""
+    contents = status.get('working_directory_contents')
+    if contents is not None and STAGE_OUT_REPORT_FILE not in contents:
+        return ""
+    try:
+        report = await pulsar_operations.read_job_file(job_id, STAGE_OUT_REPORT_FILE)
+    except Exception as error:
+        logger.warning(f"Task {job_id}: cannot read the stage-out report from Pulsar: "
+                       f"{redact_presigned_urls(str(error))}")
+        return ""
+    return (report or b"").decode("utf-8", errors="replace")
+
+
 @local_handler.register(event_name="run_task")
 async def handle_run_task(event: Event) -> None:
     """
@@ -328,7 +344,12 @@ async def handle_run_task(event: Event) -> None:
             executor_logs = [] if stage in ("stage-in", "submission") else [TesTaskExecutorLog(
                 start_time=command_start_time, end_time=command_end_time, stdout=stdout, stderr=stderr,
                 exit_code=0 if stage == "stage-out" else command_status.get('returncode', -1))]
-        await append_task_executor_logs(task_id, author, TesTaskState.RUNNING, command_end_time, executor_logs, notes)
+        # logs[].outputs (issue #31): what stage-out reported uploading, from the task's own output_confs (s3:// URLs,
+        # not presigned ones). Also after a failed stage-out, for the files it uploaded before.
+        output_logs = output_file_logs(
+            await read_stage_out_report(pulsar_operations, str(task_id), command_status), output_confs)
+        await append_task_executor_logs(task_id, author, TesTaskState.RUNNING, command_end_time, executor_logs, notes,
+                                        output_logs)
 
         current_task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
         current_task_obj = get_else_throw(current_task_monad, TaskNotFoundError(task_id))

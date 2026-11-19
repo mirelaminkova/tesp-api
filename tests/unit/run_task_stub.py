@@ -34,6 +34,7 @@ class FakeTask:
         self.state = TesTaskState.INITIALIZING
         self.executor_logs: List[TesTaskExecutorLog] = []
         self.system_logs: List[str] = []
+        self.output_file_logs: List[dict] = []
 
 
 class FakeRepository:
@@ -158,9 +159,11 @@ def run_task(monkeypatch, status: Optional[dict], executors: List[TesTaskExecuto
     monkeypatch.setattr(event_actions, 'task_repository', repository)
     monkeypatch.setattr(sys.modules['tesp_api.service.error'], 'task_repository', repository)
 
-    async def append_task_executor_logs(task_id, author, state, end, executor_logs, system_logs=()):
+    async def append_task_executor_logs(task_id, author, state, end, executor_logs, system_logs=(),
+                                        output_file_logs=()):
         task.executor_logs.extend(executor_logs)
         task.system_logs.extend(system_logs)
+        task.output_file_logs.extend(output_file_logs)
 
     async def update_last_task_log_time(*args, **kwargs):
         pass

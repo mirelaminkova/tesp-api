@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from tesp_api.utils.job_script import executor_file, job_script
+from tesp_api.utils.job_script import executor_file, job_script, STAGE_OUT_REPORT_FILE
 
 
 @pytest.fixture(autouse=True)
@@ -51,10 +51,12 @@ def test_failing_stage_ends_the_job_with_its_exit_code():
 
 
 def test_stages_run_in_order():
-    # Executors' output goes to their own files (issue #67); the stage output stays on the job's streams.
+    # Executors' output goes to their own files (issue #67); the stage-in output stays on the job's streams, the
+    # stage-out's stdout goes to its report file (issue #31).
     result = _run(job_script("echo 1", "echo 2 >> order", "echo 3 >> order", "cat order"))
     assert result.returncode == 0, result.stderr
-    assert result.stdout == "1\n2\n3\n"
+    assert result.stdout == "1\n"
+    assert Path(STAGE_OUT_REPORT_FILE).read_text() == "2\n3\n"
 
 
 # Issue #64: Pulsar appends its return-code capture to the command line, in the same shell (bash, from its job
