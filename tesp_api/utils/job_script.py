@@ -12,7 +12,9 @@ STAGE_FAILED_FILES = {"stage-in": "tesp-stage-in-failed", "stage-out": "tesp-sta
 # Each executor's stdout, stderr and "<start> <end> <exit code>" (epoch seconds) go to their own files there, so every
 # executor gets its own ExecutorLog without the stage-in and stage-out output (issue #67). Only the last
 # EXECUTOR_LOG_TAIL_BYTES of each stream are kept (TES: "no guarantees are made about how much of the stream is
-# captured"). The status file is written last: when it exists, the stream files are complete.
+# captured"). The status file holds "<start>" while the executor runs and gets its end time and exit code last: when
+# it has them, the stream files are complete. When the batch system kills the job during an executor (time or memory
+# limit), the status file keeps only the start time and the stream files are not cut to their tail (issue #67).
 EXECUTOR_FILE = "tesp-executor-{index}.{kind}"
 EXECUTOR_LOG_TAIL_BYTES = 64 * 1024
 
@@ -38,7 +40,8 @@ _EXECUTOR_END = (
 
 def _executor(index: int, command: str) -> str:
     out, err = executor_file(index, "stdout"), executor_file(index, "stderr")
-    return f"{{ start=$(date +%s); ( {command} ) >{out} 2>{err}; tesp_executor_end {index}; }}"
+    status = executor_file(index, "status")
+    return f"{{ start=$(date +%s); echo $start > {status}; ( {command} ) >{out} 2>{err}; tesp_executor_end {index}; }}"
 
 
 def job_script(*commands: Optional[str]) -> Optional[str]:
@@ -101,11 +104,23 @@ def failed_stage(status: dict) -> Optional[str]:
     return None
 
 
-def parse_executor_status(content: bytes) -> Tuple[datetime, datetime, int]:
-    """Start time, end time and exit code from an executor's status file (see ``EXECUTOR_FILE``)."""
-    start, end, exit_code = content.decode().split()
+def parse_executor_status(content: bytes) -> Tuple[datetime, Optional[datetime], Optional[int]]:
+    """
+    Start time, end time and exit code from an executor's status file (see ``EXECUTOR_FILE``). End time and exit code
+    are None when the executor did not end by itself: the batch system or Pulsar killed the job while it ran.
+    """
+    fields = content.decode().split()
+    if len(fields) == 1:
+        return datetime.fromtimestamp(int(fields[0]), timezone.utc), None, None
+    start, end, exit_code = fields
     return (datetime.fromtimestamp(int(start), timezone.utc), datetime.fromtimestamp(int(end), timezone.utc),
             int(exit_code))
+
+
+def killed_executor_log(index: int) -> str:
+    """The system log entry of executor ``index``, which never ended by itself (see ``parse_executor_status``)."""
+    return (f"executor {index} was stopped before it ended, so it has no exit code: the batch system or Pulsar ended "
+            f"the job (for example, at its time or memory limit); its stdout and stderr are what it wrote until then")
 
 
 def stream_text(content: Optional[bytes]) -> str:

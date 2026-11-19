@@ -1,6 +1,6 @@
 import os
 import datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 import asyncio
 
@@ -12,7 +12,7 @@ from pymonad.promise import Promise, _Promise
 
 from tesp_api.utils.container import stage_in_command, run_command, stage_out_command, map_volumes
 from tesp_api.utils.job_script import job_script, failed_stage, stage_failure_log, executor_file, \
-    parse_executor_status, stream_text, tesp_api_notes
+    parse_executor_status, stream_text, tesp_api_notes, killed_executor_log, EXECUTOR_LOG_TAIL_BYTES
 from tesp_api.service.pulsar_service import pulsar_service
 from tesp_api.service.resources import get_resource_config
 from tesp_api.service.event_dispatcher import dispatch_event
@@ -170,24 +170,25 @@ async def handle_initializing_task(event: Event) -> None:
 
 
 async def read_executor_logs(pulsar_operations: PulsarOperations, job_id: str, status: dict,
-                             executor_count: int) -> Optional[List[TesTaskExecutorLog]]:
+                             executor_count: int) -> Tuple[Optional[List[TesTaskExecutorLog]], List[str]]:
     """
     One log per executor that ran, from the files the job script wrote for it in the job's working directory (see
-    ``job_script``), or None when Pulsar does not list that directory (older Pulsar). A file that cannot be read is
+    ``job_script``), or None when Pulsar does not list that directory (older Pulsar); and a system log entry for each
+    executor that was killed before it ended (its log has no end time and no exit code). A file that cannot be read is
     logged and left out, rather than failing a task that ran.
     """
     if 'working_directory_contents' not in status:
-        return None
+        return None, []
     contents = set(status.get('working_directory_contents') or [])
 
-    async def read(name: str) -> Optional[bytes]:
+    async def read(name: str, tail_bytes: Optional[int] = None) -> Optional[bytes]:
         try:
-            return await pulsar_operations.read_job_file(job_id, name)
+            return await pulsar_operations.read_job_file(job_id, name, tail_bytes)
         except Exception as error:
             logger.warning(f"Task {job_id}: cannot read {name} from Pulsar: {redact_presigned_urls(str(error))}")
             return None
 
-    logs = []
+    logs, killed = [], []
     for index in range(executor_count):
         if executor_file(index, 'status') not in contents:
             continue  # did not run
@@ -197,11 +198,14 @@ async def read_executor_logs(pulsar_operations: PulsarOperations, job_id: str, s
         except (AttributeError, ValueError):
             logger.warning(f"Task {job_id}: unreadable status of executor {index}: {status_file!r}")
             continue
+        if exit_code is None:
+            # Killed while it ran (e.g. SLURM's time or memory limit): its streams were not cut to their tail.
+            killed.append(killed_executor_log(index))
         logs.append(TesTaskExecutorLog(
             start_time=start_time, end_time=end_time, exit_code=exit_code,
-            stdout=stream_text(await read(executor_file(index, 'stdout'))),
-            stderr=stream_text(await read(executor_file(index, 'stderr')))))
-    return logs
+            stdout=stream_text(await read(executor_file(index, 'stdout'), EXECUTOR_LOG_TAIL_BYTES)),
+            stderr=stream_text(await read(executor_file(index, 'stderr'), EXECUTOR_LOG_TAIL_BYTES))))
+    return logs, killed
 
 
 @local_handler.register(event_name="run_task")
@@ -311,10 +315,12 @@ async def handle_run_task(event: Event) -> None:
         # The job's own streams hold the stage-in and stage-out output; each executor's are read from its files.
         stdout, stderr = job_streams(command_status)
         stage = failed_stage(command_status)
-        executor_logs = await read_executor_logs(pulsar_operations, str(task_id), command_status, len(task.executors))
+        executor_logs, killed = await read_executor_logs(pulsar_operations, str(task_id), command_status,
+                                                         len(task.executors))
         # Notes of the stage scripts (e.g. an output not found) as system logs; in the job's stderr only without
         # executor output.
-        notes = [] if executor_logs is None else [redact_presigned_urls(note) for note in tesp_api_notes(stderr)]
+        notes = killed + ([] if executor_logs is None else
+                          [redact_presigned_urls(note) for note in tesp_api_notes(stderr)])
         if executor_logs is None:
             # One log for the whole job, as with Pulsar before the executor files. Executors ran unless stage-in or
             # the submission failed; before a failed stage-out they all succeeded.

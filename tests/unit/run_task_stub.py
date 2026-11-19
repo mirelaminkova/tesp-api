@@ -6,8 +6,10 @@ Pulsar service opens an aiohttp session at import, so both are replaced in ``sys
 import asyncio
 import importlib
 import os
+import signal
 import subprocess
 import sys
+import time
 import types
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -60,8 +62,9 @@ class FakePulsar:
         self.script: Optional[str] = None
         self.erased = False
 
-    async def read_job_file(self, job_id, name):
-        return self.files.get(name)
+    async def read_job_file(self, job_id, name, tail_bytes=None):
+        content = self.files.get(name)
+        return content if content is None or tail_bytes is None else content[-tail_bytes:]
 
     async def run_job(self, task_id, script, submit_params=None):
         self.script = script
@@ -88,9 +91,12 @@ class ScriptPulsar(FakePulsar):
     Pulsar's return-code capture, with a ``docker`` stub that runs the container command on the host; answers the
     status and file requests from that directory."""
 
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, kill_when: Optional[str] = None):
+        """``kill_when``: a file name; once the job writes it, the whole job is killed with SIGKILL, as SLURM does at
+        the job's time or memory limit (Pulsar's return-code capture then never runs)."""
         super().__init__({}, {})
         self.workdir = workdir
+        self.kill_when = kill_when
         self.result: Optional[subprocess.CompletedProcess] = None
 
     async def run_job(self, task_id, script, submit_params=None):
@@ -100,18 +106,32 @@ class ScriptPulsar(FakePulsar):
         (bin_dir / "docker").write_text(DOCKER_STUB)
         (bin_dir / "docker").chmod(0o755)
         env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
-        self.result = subprocess.run(["bash", "-c", f"{script}; return_code=$?; echo $return_code > ../return_code;"],
-                                     cwd=self.workdir, env=env, capture_output=True, timeout=60)
+        args = ["bash", "-c", f"{script}; return_code=$?; echo $return_code > ../return_code;"]
+        if self.kill_when is None:
+            self.result = subprocess.run(args, cwd=self.workdir, env=env, capture_output=True, timeout=60)
+            return
+        process = subprocess.Popen(args, cwd=self.workdir, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   start_new_session=True)
+        deadline = time.monotonic() + 30
+        while not (self.workdir / self.kill_when).exists():
+            assert process.poll() is None and time.monotonic() < deadline, "the job never wrote " + self.kill_when
+            time.sleep(0.05)
+        os.killpg(process.pid, signal.SIGKILL)
+        stdout, stderr = process.communicate(timeout=30)
+        self.result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
     async def job_status_complete(self, job_id, is_canceled):
-        return {"job_id": job_id, "complete": "true", "status": "complete",
-                "returncode": int((self.workdir.parent / "return_code").read_text()),
+        return_code = self.workdir.parent / "return_code"
+        return {"job_id": job_id, "complete": "true", "status": "complete" if return_code.exists() else "failed",
+                # Pulsar's answer when the return_code file was never written
+                "returncode": int(return_code.read_text()) if return_code.exists() else "__unknown__",
                 "job_stdout": self.result.stdout.decode(), "job_stderr": self.result.stderr.decode(),
                 "working_directory_contents": sorted(os.listdir(self.workdir))}
 
-    async def read_job_file(self, job_id, name):
+    async def read_job_file(self, job_id, name, tail_bytes=None):
         path = self.workdir / name
-        return path.read_bytes() if path.is_file() else None
+        content = path.read_bytes() if path.is_file() else None
+        return content if content is None or tail_bytes is None else content[-tail_bytes:]
 
 
 def import_event_actions(monkeypatch):

@@ -19,7 +19,7 @@ from tesp_api.repository.model.task import TesTaskExecutor, TesTaskState
 from tesp_api.service.pulsar_operations import PulsarLayerConnectionError, PulsarRestOperations
 from tesp_api.utils.container import ContainerCommandBuilder
 from tesp_api.utils.job_script import EXECUTOR_LOG_TAIL_BYTES, executor_file, job_script, parse_executor_status, \
-    stream_text, tesp_api_notes
+    stream_text, tesp_api_notes, killed_executor_log
 from tests.unit.run_task_stub import ScriptPulsar, run_task
 
 PROGRESS = "  % Total    % Received % Xferd\r100 15543  100 15543\r"
@@ -102,6 +102,7 @@ class _Pulsar(PulsarRestOperations):
 
     async def _pulsar_request(self, path, method, response_type, params=None, data=None, raise_for_status=False):
         self.requests.append((path, method, params, raise_for_status))
+        self.response_types = [*getattr(self, "response_types", []), response_type]
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
@@ -174,6 +175,34 @@ def test_older_pulsar_gets_one_log_for_the_job(monkeypatch):
     assert [(log.stdout, log.exit_code) for log in task.executor_logs] == [("a\nb\n", 0)]
 
 
+def test_executor_killed_by_the_batch_system_keeps_its_log(monkeypatch, tmp_path):
+    # SLURM kills the whole job at its time or memory limit: the executor's status file keeps only its start time, its
+    # streams are not cut to their tail, and Pulsar has no return code. The log is kept, without end time and exit code.
+    workdir = tmp_path / "working"
+    workdir.mkdir()
+    size = EXECUTOR_LOG_TAIL_BYTES * 2
+    executors = [TesTaskExecutor(image="ubuntu", command=["sh", "-c", "echo first; echo note >&2"]),
+                 TesTaskExecutor(image="ubuntu", command=[
+                     "sh", "-c", f"head -c {size} /dev/zero | tr '\\0' x; echo partial; echo dying >&2; "
+                                 f": > killme; sleep 60"]),
+                 TesTaskExecutor(image="ubuntu", command=["echo", "not-reached"])]
+    task, pulsar = run_task(monkeypatch, None, executors, pulsar=ScriptPulsar(workdir, kill_when="killme"))
+
+    assert task.state == TesTaskState.EXECUTOR_ERROR
+    assert [(log.stdout, log.stderr, log.exit_code) for log in task.executor_logs[:1]] == [("first\n", "note\n", 0)]
+    killed = task.executor_logs[1]
+    assert (killed.exit_code, killed.end_time) == (None, None)
+    assert killed.start_time is not None and killed.stderr == "dying\n"
+    assert len(killed.stdout) == EXECUTOR_LOG_TAIL_BYTES and killed.stdout.endswith("xpartial\n")
+    assert len(task.executor_logs) == 2
+    assert task.system_logs == [killed_executor_log(1)]
+
+
+def test_killed_executor_status():
+    start, end, exit_code = parse_executor_status(b"1700000000\n")
+    assert (start.timestamp(), end, exit_code) == (1700000000, None, None)
+
+
 def test_unreadable_executor_file_does_not_fail_the_task(monkeypatch):
     status = {"status": "complete", "returncode": 0, "job_stdout": "", "job_stderr": "",
               "working_directory_contents": ["tesp-job-started", executor_file(0, "status")]}
@@ -181,3 +210,31 @@ def test_unreadable_executor_file_does_not_fail_the_task(monkeypatch):
     task, _ = run_task(monkeypatch, status, [TesTaskExecutor(image="ubuntu", command=["true"])], files=files)
     assert task.state == TesTaskState.COMPLETE
     assert task.executor_logs == []
+
+
+class _Content:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    async def iter_chunked(self, size):
+        for chunk in self.chunks:
+            yield chunk
+
+
+class _Response:
+    def __init__(self, chunks):
+        self.content = _Content(chunks)
+
+
+def test_tail_of_a_large_job_file_is_read_in_chunks():
+    from tesp_api.service.pulsar_operations import _read_tail
+    chunks = [b"a" * 70000, b"b" * 70000, b"end"]
+    assert asyncio.run(_read_tail(_Response(chunks), 10)) == b"bbbbbbbend"
+    assert asyncio.run(_read_tail(_Response([b"short"]), 10)) == b"short"
+
+
+def test_executor_streams_are_read_as_their_tail():
+    pulsar = _Pulsar(b"content")
+    asyncio.run(pulsar.read_job_file("abc", "tesp-executor-0.stdout", 5))
+    assert pulsar.requests[0][1:] == ("GET", {"name": "tesp-executor-0.stdout", "type": "output_workdir"}, True)
+    assert pulsar.response_types == [("TAIL", 5)]

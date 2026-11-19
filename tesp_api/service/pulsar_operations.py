@@ -47,6 +47,14 @@ def _error_message(error: Exception) -> str:
     return f'{type(error).__name__}: {redact_presigned_urls(str(error))}'
 
 
+async def _read_tail(response, size: int) -> bytes:
+    """The last ``size`` bytes of a response body, read in chunks so that a large body is never held whole."""
+    tail = b""
+    async for chunk in response.content.iter_chunked(64 * 1024):
+        tail = (tail + chunk)[-size:]
+    return tail
+
+
 class DataType(str, Enum):
     INPUT = "input",
     OUTPUT = "output"
@@ -90,9 +98,10 @@ class PulsarOperations(ABC):
 
     @abstractmethod
     async def _pulsar_request(self, path: str, method: Literal['GET', 'POST', 'PUT', 'DELETE'],
-                              response_type: Literal['JSON', 'BYTES'], params=None, data=None,
+                              response_type, params=None, data=None,
                               raise_for_status: bool = False):
-        """A request to Pulsar's REST API; ``raise_for_status`` turns 4xx/5xx answers into errors."""
+        """A request to Pulsar's REST API; ``raise_for_status`` turns 4xx/5xx answers into errors. ``response_type``
+        is 'JSON', 'BYTES' or ('TAIL', n): the last n bytes of the body."""
 
     @abstractmethod
     def erase_job(self, task_id: ObjectId): pass
@@ -124,11 +133,13 @@ class PulsarOperations(ABC):
         return await poll_until_complete(lambda: self._job_status(job_id), is_canceled, self.status_polling,
                                          is_transient=is_transient_pulsar_error, job_id=job_id)
 
-    async def read_job_file(self, job_id: str, name: str) -> Optional[bytes]:
-        """A file in the job's working directory (where its command line runs), or None when there is no such file.
-        Both implementations read it from Pulsar's REST API."""
+    async def read_job_file(self, job_id: str, name: str, tail_bytes: Optional[int] = None) -> Optional[bytes]:
+        """A file in the job's working directory (where its command line runs), or None when there is no such file;
+        with ``tail_bytes``, only its last ``tail_bytes`` bytes are kept in memory. Both implementations read it from
+        Pulsar's REST API."""
         try:
-            return await self._pulsar_request(path=f'/jobs/{job_id}/files', method='GET', response_type='BYTES',
+            return await self._pulsar_request(path=f'/jobs/{job_id}/files', method='GET',
+                                              response_type='BYTES' if tail_bytes is None else ('TAIL', tail_bytes),
                                               params={'name': name, 'type': 'output_workdir'},
                                               raise_for_status=True)
         except PulsarLayerConnectionError as error:
@@ -156,7 +167,7 @@ class PulsarRestOperations(PulsarOperations):
             case _ as any_error: raise PulsarOperationsError(any_error)
 
     async def _pulsar_request(self, path: str, method: Literal['GET', 'POST', 'PUT', 'DELETE'],
-                              response_type: Literal['JSON', 'BYTES'], params=None, data=None,
+                              response_type, params=None, data=None,
                               raise_for_status: bool = False):
         try:
             async with self.pulsar_client.request(
@@ -166,6 +177,7 @@ class PulsarRestOperations(PulsarOperations):
                 match response_type:
                     case 'JSON': return await response.json(content_type='text/html')
                     case 'BYTES': return await response.read()
+                    case ('TAIL', int(size)): return await _read_tail(response, size)
                     case _ as value: raise ValueError(f'Got unexpected value [{value}] for response_type parameter')
         except (ClientError, asyncio.TimeoutError) as err:
             raise PulsarLayerConnectionError(err)
@@ -242,7 +254,7 @@ class PulsarAmqpOperations(PulsarOperations):
             case _ as any_error: raise PulsarOperationsError(any_error)
 
     async def _pulsar_request(self, path: str, method: Literal['GET', 'POST', 'PUT', 'DELETE'],
-                              response_type: Literal['JSON', 'BYTES'], params=None, data=None,
+                              response_type, params=None, data=None,
                               raise_for_status: bool = False):
         try:
             async with self.pulsar_client.request(
@@ -252,6 +264,7 @@ class PulsarAmqpOperations(PulsarOperations):
                 match response_type:
                     case 'JSON': return await response.json(content_type='text/html')
                     case 'BYTES': return await response.read()
+                    case ('TAIL', int(size)): return await _read_tail(response, size)
                     case _ as value: raise ValueError(f'Unexpected response_type: {value}')
         except (ClientError, asyncio.TimeoutError) as err:
             raise PulsarLayerConnectionError(err)
