@@ -11,6 +11,10 @@ updates:
     groups:
       base-images:
         patterns: ["*"]
+    ignore:
+      # New digests and Python patch releases only: a new Python minor (3.10 -> 3.13) is a deliberate, tested change.
+      - dependency-name: python
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
@@ -20,13 +24,13 @@ updates:
       actions:
         patterns: ["*"]
 
-  # "pip" covers Poetry: Dependabot reads pyproject.toml and updates poetry.lock.
+  # "pip" covers Poetry: Dependabot reads pyproject.toml and updates poetry.lock. lockfile-only keeps updates within the
+  # pyproject.toml ranges (e.g. pydantic 1, fastapi 0.75): widening a range is a manual change with code changes.
   - package-ecosystem: pip
     directory: /
     schedule:
       interval: weekly
+    versioning-strategy: lockfile-only
     groups:
-      # Minor and patch bumps in one PR; each major bump gets its own PR.
-      python-minor-patch:
+      python-deps:
         patterns: ["*"]
-        update-types: ["minor", "patch"]
