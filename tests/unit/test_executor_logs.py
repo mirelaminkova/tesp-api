@@ -238,3 +238,15 @@ def test_executor_streams_are_read_as_their_tail():
     asyncio.run(pulsar.read_job_file("abc", "tesp-executor-0.stdout", 5))
     assert pulsar.requests[0][1:] == ("GET", {"name": "tesp-executor-0.stdout", "type": "output_workdir"}, True)
     assert pulsar.response_types == [("TAIL", 5)]
+
+
+def test_tail_reads_time_out_per_read_not_for_the_whole_download():
+    from aiohttp import ClientTimeout
+    from tesp_api.service.pulsar_operations import _request_timeout
+
+    class _Client:
+        timeout = ClientTimeout(total=30)
+
+    assert _request_timeout(_Client(), "BYTES") == {}
+    assert _request_timeout(_Client(), ("TAIL", 10)) == {
+        "timeout": ClientTimeout(total=None, sock_connect=30, sock_read=30)}

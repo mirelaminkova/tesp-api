@@ -199,7 +199,7 @@ async def read_executor_logs(pulsar_operations: PulsarOperations, job_id: str, s
             logger.warning(f"Task {job_id}: unreadable status of executor {index}: {status_file!r}")
             continue
         if exit_code is None:
-            # Killed while it ran (e.g. SLURM's time or memory limit): its streams were not cut to their tail.
+            # Killed while it ran (e.g. SLURM's time limit): its streams were not cut to their tail.
             killed.append(killed_executor_log(index))
         logs.append(TesTaskExecutorLog(
             start_time=start_time, end_time=end_time, exit_code=exit_code,

@@ -9,7 +9,7 @@ from urllib.parse import quote
 from pymonad.maybe import Maybe, Nothing
 from bson.objectid import ObjectId
 from pymonad.promise import Promise
-from aiohttp import ClientSession, ClientError, ClientResponseError, TraceRequestStartParams
+from aiohttp import ClientSession, ClientTimeout, ClientError, ClientResponseError, TraceRequestStartParams
 from loguru import logger
 
 from tesp_api.repository.model.task import TesTaskIOType
@@ -53,6 +53,15 @@ async def _read_tail(response, size: int) -> bytes:
     async for chunk in response.content.iter_chunked(64 * 1024):
         tail = (tail + chunk)[-size:]
     return tail
+
+
+def _request_timeout(client: ClientSession, response_type) -> dict:
+    """A tail read may download a large file (a killed executor's streams are not cut): the session's timeout then
+    applies per connect and per read, not to the whole download."""
+    if not (isinstance(response_type, tuple) and response_type[0] == 'TAIL'):
+        return {}
+    limit = getattr(getattr(client, 'timeout', None), 'total', None)
+    return {'timeout': ClientTimeout(total=None, sock_connect=limit, sock_read=limit)}
 
 
 class DataType(str, Enum):
@@ -171,7 +180,8 @@ class PulsarRestOperations(PulsarOperations):
                               raise_for_status: bool = False):
         try:
             async with self.pulsar_client.request(
-                    url=f'{self.base_url}{path}', method=method, params=params, data=data) as response:
+                    url=f'{self.base_url}{path}', method=method, params=params, data=data,
+                    **_request_timeout(self.pulsar_client, response_type)) as response:
                 if raise_for_status:
                     response.raise_for_status()
                 match response_type:
@@ -258,7 +268,8 @@ class PulsarAmqpOperations(PulsarOperations):
                               raise_for_status: bool = False):
         try:
             async with self.pulsar_client.request(
-                    url=f'{self.base_url}{path}', method=method, params=params, data=data) as response:
+                    url=f'{self.base_url}{path}', method=method, params=params, data=data,
+                    **_request_timeout(self.pulsar_client, response_type)) as response:
                 if raise_for_status:
                     response.raise_for_status()
                 match response_type:

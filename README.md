@@ -228,9 +228,10 @@ output in `logs[].system_logs` (`view=FULL`). Executors that did not run get no 
 Each executor that ran gets its own entry in `logs[].logs`, in order, with its own `stdout` and `stderr` (the last
 64 KiB of each), `exit_code`, `start_time` and `end_time`. Output of the stage-in and stage-out containers is not part
 of them; their notes (e.g. an output that was not found) go to `logs[].system_logs`. An executor that the batch system
-or Pulsar stopped while it ran (for example, at the SLURM job's time or memory limit) keeps its log with what it wrote
-until then, but without `exit_code` and `end_time`, and a note in `logs[].system_logs` says so; the task ends in
-`EXECUTOR_ERROR`.
+or Pulsar stopped while it ran (for example, when the SLURM job reached its time limit) keeps its log with what it
+wrote until then, but without `exit_code` and `end_time`, and a note in `logs[].system_logs` says so; the task ends in
+`EXECUTOR_ERROR`. An executor killed for using too much memory usually gets exit code 137 instead, as the kernel kills
+only its processes. A task canceled through tesp-api gets no executor logs for the executors still running.
 
 &nbsp;
 ### S3 inputs and outputs

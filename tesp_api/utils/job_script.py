@@ -13,7 +13,7 @@ STAGE_FAILED_FILES = {"stage-in": "tesp-stage-in-failed", "stage-out": "tesp-sta
 # executor gets its own ExecutorLog without the stage-in and stage-out output (issue #67). Only the last
 # EXECUTOR_LOG_TAIL_BYTES of each stream are kept (TES: "no guarantees are made about how much of the stream is
 # captured"). The status file holds "<start>" while the executor runs and gets its end time and exit code last: when
-# it has them, the stream files are complete. When the batch system kills the job during an executor (time or memory
+# it has them, the stream files are complete. When the batch system kills the job during an executor (e.g. its time
 # limit), the status file keeps only the start time and the stream files are not cut to their tail (issue #67).
 EXECUTOR_FILE = "tesp-executor-{index}.{kind}"
 EXECUTOR_LOG_TAIL_BYTES = 64 * 1024
@@ -120,7 +120,7 @@ def parse_executor_status(content: bytes) -> Tuple[datetime, Optional[datetime],
 def killed_executor_log(index: int) -> str:
     """The system log entry of executor ``index``, which never ended by itself (see ``parse_executor_status``)."""
     return (f"executor {index} was stopped before it ended, so it has no exit code: the batch system or Pulsar ended "
-            f"the job (for example, at its time or memory limit); its stdout and stderr are what it wrote until then")
+            f"the job (for example, at its time limit); its stdout and stderr are what it wrote until then")
 
 
 def stream_text(content: Optional[bytes]) -> str:
