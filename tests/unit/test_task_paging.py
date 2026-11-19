@@ -4,23 +4,13 @@
 MongoDB returns unsorted results in natural (storage) order, which need not follow `_id`. The fake collection below
 keeps its own natural order, different from `_id` order, so paging that forgets to sort skips or repeats tasks.
 """
-import sys
-import types
-
 import pytest
 from bson.objectid import ObjectId
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-try:
-    import motor.motor_asyncio  # noqa: F401
-except ImportError:
-    # motor 2.5 imports asyncio.coroutine, which Python 3.11 (CI) removed; the image runs 3.10. These tests replace the
-    # collection with a fake, so the client class is never used.
-    sys.modules['motor.motor_asyncio'] = types.SimpleNamespace(AsyncIOMotorClient=None)
-
-from tesp_api.repository.task_repository import task_repository  # noqa: E402
-from tesp_api.api.api import api_router  # noqa: E402
+from tesp_api.api.api import api_router
+from tesp_api.repository.task_repository import task_repository
 
 PAGE_SIZE = 3
 
