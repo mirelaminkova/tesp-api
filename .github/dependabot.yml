@@ -1,0 +1,36 @@
+# Keeps the digest-pinned Docker base images (#9), the workflow actions and the Python
+# dependencies (pyproject.toml + poetry.lock) current (issue #11).
+version: 2
+updates:
+  - package-ecosystem: docker
+    directories:
+      - /docker/tesp_api
+      - /docker/pulsar_rest
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+    ignore:
+      # New digests and Python patch releases only: a new Python minor (3.10 -> 3.13) is a deliberate, tested change.
+      - dependency-name: python
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # "pip" covers Poetry: Dependabot reads pyproject.toml and updates poetry.lock. lockfile-only keeps updates within the
+  # pyproject.toml ranges (e.g. pydantic 1, fastapi 0.75): widening a range is a manual change with code changes.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    versioning-strategy: lockfile-only
+    groups:
+      python-deps:
+        patterns: ["*"]
