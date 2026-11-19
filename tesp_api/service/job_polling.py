@@ -86,6 +86,8 @@ async def _canceled(is_canceled: Callable[[], Awaitable[bool]]) -> bool:
     try:
         return await is_canceled()
     except Exception as error:
+        if getattr(error, 'stops_polling', False):
+            raise  # e.g. task_recovery.LeaseLostError: another process waits for the job now
         # Keep the job: a failed check (e.g. a database hiccup) is no reason to give up on a running task.
         logger.warning(f'Could not check whether the task was canceled [{type(error).__name__}: {error}]')
         return False

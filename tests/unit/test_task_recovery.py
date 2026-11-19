@@ -298,7 +298,16 @@ def test_submitted_initializing_task_is_resumed(repo, recovery):
     assert operations.erased == []
 
 
-@pytest.mark.parametrize('state', [TesTaskState.QUEUED, TesTaskState.INITIALIZING, TesTaskState.RUNNING])
+def test_running_task_of_an_older_tesp_api_is_resumed(repo, recovery):
+    # Stored before the submission mark: a RUNNING task's job was submitted (#65), so the wait is resumed.
+    task = repo.add(TesTaskState.RUNNING, _id=_old_id())
+    operations = FakeOperations()
+    assert asyncio.run(recovery.sweep(lambda: operations)) == 1
+    assert [name for name, _ in recovery.dispatched] == ['resume_task']
+    assert task['state'] == TesTaskState.RUNNING and operations.erased == []
+
+
+@pytest.mark.parametrize('state', [TesTaskState.QUEUED, TesTaskState.INITIALIZING])
 def test_task_never_submitted_ends_in_system_error(repo, recovery, state):
     task = repo.add(state, tesp_lease=_lease('gone', -1))
     operations = FakeOperations()
@@ -366,7 +375,7 @@ def test_resumed_task_completes_with_its_executor_log(repo, recovery):
 
 def test_resumed_task_failing_ends_in_executor_error(repo, recovery):
     event_actions = _import_event_actions()
-    task = repo.add(TesTaskState.RUNNING, tesp_pulsar_job_submitted=True)
+    task = repo.add(TesTaskState.RUNNING, tesp_pulsar_job_submitted=True, tesp_lease=_lease(recovery.INSTANCE_ID, 60))
     operations = FakeOperations(job_status={'complete': 'true', 'returncode': 2})
 
     asyncio.run(event_actions.handle_resume_task(
@@ -414,7 +423,7 @@ def test_task_queued_in_slurm_during_a_restart_survives_it(repo, recovery):
 def test_resumed_task_whose_stage_out_failed_ends_in_system_error(repo, recovery):
     # The chain's finish logic (#83/#84) applies to a resumed wait too.
     event_actions = _import_event_actions()
-    task = repo.add(TesTaskState.RUNNING, tesp_pulsar_job_submitted=True)
+    task = repo.add(TesTaskState.RUNNING, tesp_pulsar_job_submitted=True, tesp_lease=_lease(recovery.INSTANCE_ID, 60))
     operations = FakeOperations(job_status={
         'complete': 'true', 'status': 'complete', 'returncode': 6, 'job_stdout': '', 'job_stderr': 'upload refused',
         'working_directory_contents': ['tesp-job-started', 'tesp-stage-out-failed', 'tesp-executor-0.status']},
@@ -426,3 +435,89 @@ def test_resumed_task_whose_stage_out_failed_ends_in_system_error(repo, recovery
     assert task['state'] == TesTaskState.SYSTEM_ERROR
     assert [log['exit_code'] for log in task['logs'][0]['logs']] == [0]
     assert any(log.startswith('stage-out failed') for log in task['logs'][0]['system_logs'])
+
+
+def test_resumed_running_task_keeps_its_start_time(repo, recovery):
+    event_actions = _import_event_actions()
+    started = NOW - datetime.timedelta(hours=2)
+    task = repo.add(TesTaskState.RUNNING, tesp_pulsar_job_submitted=True, tesp_lease=_lease(recovery.INSTANCE_ID, 60))
+    task['logs'][0]['start_time'] = started
+    operations = FakeOperations(statuses=[{'complete': 'false', 'status': 'running'},
+                                          {'complete': 'true', 'status': 'complete', 'returncode': 0,
+                                           'job_stdout': 'out\n', 'job_stderr': ''}])
+    asyncio.run(event_actions.handle_resume_task(
+        ('resume_task', {'task_id': task['_id'], 'author': None, 'pulsar_operations': operations})))
+    assert task['state'] == TesTaskState.COMPLETE
+    assert operations.states_seen == [TesTaskState.RUNNING, TesTaskState.RUNNING]
+    [executor_log] = task['logs'][0]['logs']
+    assert executor_log['start_time'] == started.isoformat()  # older Pulsar: one log for the job, from its start
+
+
+def test_task_canceled_during_a_resumed_wait_gets_its_job_canceled(repo, recovery):
+    event_actions = _import_event_actions()
+    task = repo.add(TesTaskState.INITIALIZING, tesp_pulsar_job_submitted=True,
+                    tesp_lease=_lease(recovery.INSTANCE_ID, 60))
+    operations = FakeOperations(statuses=[{'complete': 'false', 'status': 'queued'}] * 5)
+    original = operations.job_status_complete
+
+    async def cancel_then_wait(job_id, is_canceled, on_started=None):
+        task['state'] = TesTaskState.CANCELED  # what POST /tasks/{id}:cancel does
+        return await original(job_id, is_canceled, on_started)
+
+    operations.job_status_complete = cancel_then_wait
+    asyncio.run(event_actions.handle_resume_task(
+        ('resume_task', {'task_id': task['_id'], 'author': None, 'pulsar_operations': operations})))
+    assert task['state'] == TesTaskState.CANCELED
+    assert operations.erased == [str(task['_id'])]
+    assert 'tesp_lease' not in task
+
+
+def test_process_that_lost_its_lease_stops_waiting(repo, recovery):
+    # This process stalled past its lease and another one claimed the task: this one must not finish it too.
+    event_actions = _import_event_actions()
+    task = repo.add(TesTaskState.RUNNING, tesp_pulsar_job_submitted=True, tesp_lease=_lease('other', 60))
+    operations = FakeOperations(statuses=[{'complete': 'false', 'status': 'running'},
+                                          {'complete': 'true', 'status': 'complete', 'returncode': 0}])
+    asyncio.run(event_actions.handle_resume_task(
+        ('resume_task', {'task_id': task['_id'], 'author': None, 'pulsar_operations': operations})))
+    assert task['state'] == TesTaskState.RUNNING
+    assert task['logs'][0]['logs'] == [] and operations.erased == []
+    assert task['tesp_lease']['owner'] == 'other'  # left to the process that holds it
+    assert operations.states_seen == []  # stopped before the first status request
+
+
+def test_lease_lost_while_the_job_ran_is_noticed_before_finishing(repo, recovery):
+    event_actions = _import_event_actions()
+    task = repo.add(TesTaskState.RUNNING, tesp_pulsar_job_submitted=True, tesp_lease=_lease(recovery.INSTANCE_ID, 60))
+    operations = FakeOperations(job_status={'complete': 'true', 'returncode': 0})
+    original = operations.job_status_complete
+
+    async def taken_over_meanwhile(job_id, is_canceled, on_started=None):
+        task['tesp_lease'] = _lease('other', 60)
+        return await original(job_id, is_canceled, on_started)
+
+    operations.job_status_complete = taken_over_meanwhile
+    asyncio.run(event_actions.handle_resume_task(
+        ('resume_task', {'task_id': task['_id'], 'author': None, 'pulsar_operations': operations})))
+    assert task['state'] == TesTaskState.RUNNING and operations.erased == []
+
+
+def test_task_whose_error_update_failed_is_left_for_the_next_sweep(repo, recovery, monkeypatch):
+    task = repo.add(TesTaskState.QUEUED, tesp_lease=_lease('gone', -1))
+
+    async def failing_update(*args, **kwargs):
+        pass  # repo_update_error_task_promise logs and swallows database errors
+
+    monkeypatch.setattr(recovery, 'repo_update_error_task_promise', failing_update)
+    asyncio.run(recovery.sweep(FakeOperations))
+    assert task['state'] == TesTaskState.QUEUED
+    assert task['tesp_lease']['expires'] <= datetime.datetime.now(datetime.timezone.utc)  # not kept by this process
+
+
+def test_run_task_marks_the_job_submitted(monkeypatch, tmp_path):
+    # Without the mark, a restart would end a task whose job waits in SLURM's queue instead of resuming it.
+    from tesp_api.repository.model.task import TesTaskExecutor
+    from tests.unit.run_task_stub import run_task
+    status = {'complete': 'true', 'status': 'complete', 'returncode': 0, 'job_stdout': '', 'job_stderr': ''}
+    task, _ = run_task(monkeypatch, status, [TesTaskExecutor(image='ubuntu', command=['true'])])
+    assert task.marks.get('tesp_pulsar_job_submitted') is True

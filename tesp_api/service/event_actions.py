@@ -353,10 +353,12 @@ async def _wait_and_finish(task_id: ObjectId, author: Optional[str], pulsar_oper
 
     # POST /tasks/{id}:cancel only marks the task; polling notices it and ends the Pulsar job (see _guarded).
     async def is_canceled() -> bool:
+        await task_recovery.hold(task_id)  # stops here if another process took the task over
         task_monad = await task_repository.get_task(maybe_of(author), {'_id': task_id})
         return task_monad.is_just() and task_monad.value.state == TesTaskState.CANCELED
 
     command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled, on_started=on_started)
+    await task_recovery.hold(task_id)
     await _finish(task_id, author, pulsar_operations, event_name, executor_count,
                   started['at'] or datetime.datetime.now(datetime.timezone.utc), command_status)
 
@@ -434,6 +436,11 @@ async def _guarded(work: Awaitable[None], task_id: ObjectId, author: Optional[st
     except TaskCanceledError:
         logger.info(f"Task {task_id} was canceled while its Pulsar job ran. Stopped polling, canceling the job.")
         await pulsar_cancel_task_promise(str(task_id), pulsar_operations)
+
+    except task_recovery.LeaseLostError as error:
+        # Not an error of the task: the process that took it over finishes it, and releases the lease.
+        logger.warning(f"Stopped waiting for task {task_id}: {error}.")
+        return
 
     except asyncio.CancelledError:
         # tesp-api is shutting down, not the client canceling. The task keeps its state and its Pulsar job goes on;

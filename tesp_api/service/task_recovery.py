@@ -7,10 +7,13 @@ process that stops, cleanly or not, stops renewing them, and a clean shutdown le
 sweep, every process looks for tasks whose lease has expired and claims them one by one with an atomic update, so
 only one process takes over a given task:
 
-* ``INITIALIZING`` or ``RUNNING`` with its Pulsar job submitted (``tesp_pulsar_job_submitted``): waiting for the
+* ``RUNNING``, or ``INITIALIZING`` with its Pulsar job submitted (``tesp_pulsar_job_submitted``): waiting for the
   job is resumed, and the task ends as usual, with its executor logs. An INITIALIZING task's job waits in the batch
   system's queue (issue #65); the task becomes RUNNING once the job runs. The Pulsar job id is the task id.
-* ``QUEUED``, or ``INITIALIZING`` or ``RUNNING`` without a submitted job: the task was never run. It is set to
+* ``QUEUED``, or ``INITIALIZING`` without a submitted job: the task was never run.
+
+A process that stalls past its lease (a blocked event loop, a database outage) loses the task to another process; it
+notices at its next status request (``hold``) and stops waiting, so the task is finished once. It is set to
   ``SYSTEM_ERROR`` with a system log, and whatever Pulsar holds for it is erased. It is not resubmitted, as its inputs
   may have been staged in part.
 * ``CANCELED`` with a lease left: the client canceled it while no process was there to end its Pulsar job, which is
@@ -94,6 +97,27 @@ async def renew() -> None:
         {'$set': {f'{LEASE_FIELD}.expires': _now() + datetime.timedelta(seconds=LEASE_SECONDS)}})
 
 
+class LeaseLostError(Exception):
+    """Another tesp-api process took the task over (this one stalled past its lease); this one must stop."""
+    stops_polling = True
+
+    def __init__(self, task_id: ObjectId):
+        super().__init__(f'task {task_id} was taken over by another tesp-api process')
+
+
+async def hold(task_id: ObjectId) -> None:
+    """
+    Renews this process's lease of a task it is waiting for, at each status request and before the task is
+    finished. Raises ``LeaseLostError`` when another process has claimed it meanwhile, so the task is never waited for
+    and finished by two processes.
+    """
+    held = await task_repository.update_tasks(
+        {'_id': task_id, **own_leases_query()},
+        {'$set': {f'{LEASE_FIELD}.expires': _now() + datetime.timedelta(seconds=LEASE_SECONDS)}})
+    if not held:
+        raise LeaseLostError(task_id)
+
+
 async def let_go() -> None:
     """On shutdown: lets this process's leases expire now, so another process takes the tasks over at once."""
     await task_repository.update_tasks(own_leases_query(), {'$set': {f'{LEASE_FIELD}.expires': _now()}})
@@ -109,8 +133,10 @@ async def claim_orphan() -> Optional[dict]:
 async def recover(task: dict, pulsar_operations: PulsarOperations) -> None:
     task_id: ObjectId = task['_id']
     state = task.get('state')
-    # With its job submitted, an INITIALIZING task waits in the batch system's queue (issue #65).
-    if state in (TesTaskState.INITIALIZING, TesTaskState.RUNNING) and task.get(SUBMITTED_FIELD):
+    # A task is RUNNING only once its job left the batch system's queue (issue #65), so its job was submitted, also
+    # when it was stored by a tesp-api from before the submission mark. With its job submitted, an INITIALIZING task
+    # waits in that queue.
+    if state == TesTaskState.RUNNING or (state == TesTaskState.INITIALIZING and task.get(SUBMITTED_FIELD)):
         logger.info(f'Resuming the wait for the Pulsar job of {state} task {task_id}, left by a stopped tesp-api '
                     f'process.')
         dispatch_event('resume_task', {'task_id': task_id, 'author': task.get('author'),
@@ -125,6 +151,10 @@ async def recover(task: dict, pulsar_operations: PulsarOperations) -> None:
                                              unless_canceled=True)
     await pulsar_cancel_task_promise(str(task_id), pulsar_operations)
     await release(task_id)
+    # The update above logs and swallows database errors: a task still active is left for the next sweep, rather
+    # than renewed by this process for as long as it lives.
+    await task_repository.update_tasks({'_id': task_id, 'state': {'$in': ACTIVE_STATES}},
+                                       {'$set': {f'{LEASE_FIELD}.expires': _now()}})
 
 
 async def sweep(get_operations: Callable[[], PulsarOperations]) -> int:
