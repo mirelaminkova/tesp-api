@@ -523,7 +523,9 @@ def output_file_logs(report: str, output_confs: List[dict]) -> List[dict]:
     job was killed, are left out.
     """
     logs = []
-    for line in report.splitlines():
+    # Only "\n" ends a line: the stage-out leaves out names with one, but other characters splitlines() would split on
+    # ("\r", "\x1c", ...) are valid in file names.
+    for line in report.split("\n"):
         fields = line.split("\t", 3)
         if len(fields) != 4 or fields[0] != OUTPUT_REPORT_PREFIX or not fields[1].isdigit() \
                 or int(fields[1]) >= len(output_confs) or not fields[2].strip().isdigit():

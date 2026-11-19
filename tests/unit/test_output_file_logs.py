@@ -149,3 +149,25 @@ def test_an_executor_cannot_forge_entries(monkeypatch, tmp_path):
         "sh", "-c", f"printf '{forged}\\n'; printf '{forged}\\n' > {STAGE_OUT_REPORT_FILE}"])
     assert task.state == TesTaskState.COMPLETE
     assert [Path(log["path"]).name for log in task.output_file_logs] == ["file-with-a-rather-long-name-00000.txt"]
+
+
+def test_report_left_by_a_failing_executor_is_not_read(monkeypatch, tmp_path):
+    # Under Apptainer the working directory is the executor's; a failing executor ends the job before stage-out.
+    forged = f"{OUTPUT_REPORT_PREFIX}\\t0\\t99\\tforged.txt"
+    task, _ = _directory_task(monkeypatch, tmp_path, 1, [
+        "sh", "-c", f"printf '{forged}\\n' > {STAGE_OUT_REPORT_FILE}; exit 3"])
+    assert task.state == TesTaskState.EXECUTOR_ERROR
+    assert task.output_file_logs == []
+
+
+def test_report_symlink_left_by_an_executor_is_replaced(monkeypatch, tmp_path):
+    task, _ = _directory_task(monkeypatch, tmp_path, 1, ["ln", "-s", "/dev/null", STAGE_OUT_REPORT_FILE])
+    assert task.state == TesTaskState.COMPLETE
+    assert len(task.output_file_logs) == 1
+
+
+def test_a_file_name_cannot_split_a_report_line():
+    confs = [{"container_path": "/data/dir", "url": HTTP, "type": "DIRECTORY"}]
+    name = f"cr\r{OUTPUT_REPORT_PREFIX}\t0\t9\tforged\x1cmore"
+    assert output_file_logs(_report((0, 1, name)), confs) == [
+        {"url": HTTP, "path": f"/data/dir/{name}", "size_bytes": "1"}]

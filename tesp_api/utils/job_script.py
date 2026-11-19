@@ -20,7 +20,9 @@ EXECUTOR_LOG_TAIL_BYTES = 64 * 1024
 
 # The stage-out's stdout: its report of each uploaded file (see container.output_file_logs), for logs[].outputs
 # (issue #31). A file rather than the job's stdout, which Pulsar returns only up to a size limit. The job script writes
-# it after the executors have run, so their output cannot end up in it.
+# it after the executors have run, removing any file an executor left under that name first (also when stage-out does
+# not run), so their output cannot end up in it; only a process an executor left running in the background could still
+# write to it.
 STAGE_OUT_REPORT_FILE = "tesp-stage-out.report"
 
 # Lines and characters of the job's stderr quoted in the system log of a failed stage
@@ -80,8 +82,11 @@ def job_script(*commands: Optional[str], ignore_errors: Sequence[bool] = ()) -> 
 
     def stage(command: str, name: str) -> str:
         # A stage command may itself be a list, e.g. "mkdir -p ... && docker run ...", hence its own subshell.
-        report = f" >{STAGE_OUT_REPORT_FILE}" if name == "stage-out" else ""
-        return f"( {command} ){report} || {{ rc=$?; : > {STAGE_FAILED_FILES[name]}; exit $rc; }}"
+        # The report file is removed first: an executor may have left one (or a symbolic link) in the working
+        # directory, which is bound into its container under Apptainer.
+        report = f"rm -f {STAGE_OUT_REPORT_FILE}; " if name == "stage-out" else ""
+        redirect = f" >{STAGE_OUT_REPORT_FILE}" if name == "stage-out" else ""
+        return f"{report}( {command} ){redirect} || {{ rc=$?; : > {STAGE_FAILED_FILES[name]}; exit $rc; }}"
 
     script: List[str] = [f": > {JOB_STARTED_FILE}"]
     if stage_in:
@@ -89,7 +94,7 @@ def job_script(*commands: Optional[str], ignore_errors: Sequence[bool] = ()) -> 
     if executors:
         script.append(_EXECUTOR_END)
         script.append(" && ".join(_executor(i, c, i < len(ignore_errors) and bool(ignore_errors[i]))
-                                  for i, c in executors) + " || exit $?")
+                                  for i, c in executors) + f" || {{ rc=$?; rm -f {STAGE_OUT_REPORT_FILE}; exit $rc; }}")
     if stage_out:
         script.append(stage(stage_out, "stage-out"))
     return "( " + "; ".join(script) + " )"

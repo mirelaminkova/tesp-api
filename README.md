@@ -234,7 +234,8 @@ in the container, its `size_bytes`, and its `url`, which is the task's own URL (
 `DIRECTORY` outputs and of wildcard outputs are listed one by one. For S3, a directory's file gets the output's URL
 joined with its relative path (percent-encoded), which is its key; HTTP(S) upload endpoints receive every file at the
 output's URL, so that is the URL listed. Missing outputs, and files whose name contains a newline (uploaded all the
-same), are not listed. An executor that the batch system
+same), are not listed. The list comes from a report the stage-out writes to the job's working directory after the
+executors; under Apptainer an executor that leaves a process running in the background could still write to it. An executor that the batch system
 or Pulsar stopped while it ran (for example, when the SLURM job reached its time limit) keeps its log with what it
 wrote until then, but without `exit_code` and `end_time`, and a note in `logs[].system_logs` says so; the task ends in
 `EXECUTOR_ERROR`. An executor killed for using too much memory usually gets exit code 137 instead, as the kernel kills
