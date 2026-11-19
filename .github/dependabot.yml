@@ -1,4 +1,5 @@
-# Keeps the digest-pinned Docker base images (#9) and the workflow actions current (issue #11).
+# Keeps the digest-pinned Docker base images (#9), the workflow actions and the Python
+# dependencies (pyproject.toml + poetry.lock) current (issue #11).
 version: 2
 updates:
   - package-ecosystem: docker
@@ -18,3 +19,14 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  # "pip" covers Poetry: Dependabot reads pyproject.toml and updates poetry.lock.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      # Minor and patch bumps in one PR; each major bump gets its own PR.
+      python-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
