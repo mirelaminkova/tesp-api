@@ -29,7 +29,7 @@ async def get_root() -> RedirectResponse:
 async def startup_event():
     logg_configure()
     get_s3_config()  # fail at startup on invalid s3.* settings
-    get_resource_config()  # and on invalid container.resource_limits / pulsar.native_specification.*
+    get_resource_config()  # and on invalid container.resource_limits / container.writable_tmpfs / pulsar.native_specification.*
     get_status_polling()  # and on invalid pulsar.status.*, warning about deprecated ones
     await task_repository.init()
     asyncio.get_event_loop().set_debug(properties.logging.level == "DEBUG")

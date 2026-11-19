@@ -200,7 +200,7 @@ def test_run_command_passes_executor_streams(tmp_path):
     src.write_text("xyz\n")
     executor = TesTaskExecutor(image=IMAGE, command=["tr", "a-z", "A-Z"], stdin=str(src), stdout=str(out))
     cmd = run_command(executor=executor, job_id="job", resource_conf={}, volume_confs=[], input_confs=[],
-                      output_confs=[], inputs_directory="", container_type="docker")
+                      output_confs=[], inputs_directory="", container_type="docker", writable_tmpfs=True)
 
     result = _run(_container_argv(cmd))
     assert result.returncode == 0

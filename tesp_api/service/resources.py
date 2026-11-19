@@ -47,10 +47,15 @@ class ResourceConfig:
     ``--cpus-per-task={cpu_cores}`` and ``--mem={ram_mib}`` for SLURM), each used only when the task requests that
     resource. Placeholders: ``{cpu_cores}`` for the CPU template, ``{ram_gb}`` and ``{ram_mib}`` (ram_gb in whole MiB,
     rounded up) for the memory template.
+
+    ``writable_tmpfs`` (``container.writable_tmpfs``) runs singularity executors with ``--writable-tmpfs``. That needs a
+    usable overlay on the nodes that run the jobs (not ``enable overlay = no`` in ``apptainer.conf``, and overlayfs from
+    the kernel or fuse-overlayfs); set it to false where overlay is unavailable, or every singularity task fails.
     """
     container_limits: str = 'auto'
     native_spec_cpu_cores: str = ''
     native_spec_ram_gb: str = ''
+    writable_tmpfs: bool = True
 
     def __post_init__(self):
         if self.container_limits not in RESOURCE_LIMIT_MODES:
@@ -58,6 +63,8 @@ class ResourceConfig:
                              f'got {self.container_limits!r}')
         _check_template('pulsar.native_specification.cpu_cores', self.native_spec_cpu_cores, _cpu_values(2))
         _check_template('pulsar.native_specification.ram_gb', self.native_spec_ram_gb, _ram_values(1.5))
+        if not isinstance(self.writable_tmpfs, bool):
+            raise ValueError(f'container.writable_tmpfs must be true or false, got {self.writable_tmpfs!r}')
 
     def container_resource_conf(self, resource_conf: Optional[dict], container_type: str) -> dict:
         """``resource_conf`` if limit flags go on the ``container_type`` command line, else ``{}``."""
@@ -92,10 +99,18 @@ def load_resource_config(props=None) -> ResourceConfig:
         value = conf.get(name)
         return '' if value is None else str(value).strip()
 
+    def flag(conf, name, default: bool):
+        value = conf.get(name)
+        if value is None or isinstance(value, bool):
+            return default if value is None else value
+        text = str(value).strip().lower()  # e.g. a TESP_API_CONTAINER__WRITABLE_TMPFS that is not TOML
+        return {'true': True, 'false': False}.get(text, value)
+
     return ResourceConfig(
         container_limits=setting(container, 'resource_limits').lower() or 'auto',
         native_spec_cpu_cores=setting(native_spec, 'cpu_cores'),
-        native_spec_ram_gb=setting(native_spec, 'ram_gb'))
+        native_spec_ram_gb=setting(native_spec, 'ram_gb'),
+        writable_tmpfs=flag(container, 'writable_tmpfs', True))
 
 
 @lru_cache(maxsize=1)

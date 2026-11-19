@@ -38,6 +38,7 @@ class ContainerCommandBuilder:
         self._stdin: Maybe[str] = Nothing
         self._stdout: Maybe[str] = Nothing
         self._stderr: Maybe[str] = Nothing
+        self._writable_tmpfs = False
 
     def with_job_id(self, job_id: str):
         self._job_id = job_id
@@ -77,6 +78,15 @@ class ContainerCommandBuilder:
                 self._image = Just(f"docker://{image}")
         else:
             self._image = Just(image)
+        return self
+
+    def with_writable_tmpfs(self):
+        """
+        Singularity only: a writable tmpfs overlay over the container's filesystem (``--writable-tmpfs``), so the
+        command can write anywhere, as in a Docker container's writable layer; e.g. next to its inputs. Writes are
+        discarded when the container exits and limited by ``sessiondir max size`` in ``apptainer.conf``.
+        """
+        self._writable_tmpfs = True
         return self
 
     def with_workdir(self, workdir: str):
@@ -178,6 +188,7 @@ class ContainerCommandBuilder:
         self._stdin = Nothing
         self._stdout = Nothing
         self._stderr = Nothing
+        self._writable_tmpfs = False
         return self
 
     def get_run_command(self) -> str:
@@ -240,7 +251,8 @@ class ContainerCommandBuilder:
 
         # Build final command
         # --no-eval: Apptainer otherwise shell-evaluates env values inside the container, unlike docker
-        runtime = "docker run" if docker else "singularity exec --no-eval"
+        runtime = "docker run" if docker else "singularity exec --no-eval" + (
+            " --writable-tmpfs" if self._writable_tmpfs else "")
         container_cmd = " ".join(filter(None, [
             *env_prefix, runtime, cpu_flag, mem_flag, workdir_flag, *env_flags, *mount_flags, image, command_str]))
         return " && ".join([*mkdir_cmds, container_cmd])
@@ -303,7 +315,9 @@ def run_command(
     inputs_directory: str,
     container_type: str,
     job_directory: Optional[str] = None,
-    executor_index: int = 0
+    executor_index: int = 0,
+    *,
+    writable_tmpfs: bool  # no default: the caller must pass container.writable_tmpfs, or turning it off does nothing
 ) -> str:
     builder = ContainerCommandBuilder(container_type) \
         .with_job_id(job_id) \
@@ -331,8 +345,14 @@ def run_command(
 
         builder.with_bind_mount(input_conf['container_path'], input_conf['pulsar_path'])
 
-    if not executor.workdir and container_type == "singularity":
-        builder.with_workdir("/")
+    if container_type == "singularity":
+        # Docker gives each executor a writable container layer; without this, Apptainer's container filesystem and
+        # the directories it creates for input mounts are read-only (issue #68). Off (container.writable_tmpfs) where
+        # overlay is unavailable (e.g. "enable overlay = no" in apptainer.conf), which makes --writable-tmpfs fail.
+        if writable_tmpfs:
+            builder.with_writable_tmpfs()
+        if not executor.workdir:
+            builder.with_workdir("/")
 
     return builder.get_run_command()
 

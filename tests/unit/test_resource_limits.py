@@ -23,7 +23,8 @@ RESOURCES = {'cpu_cores': 2, 'ram_gb': 1.5}
 def _run_command(container_type: str, resource_conf: dict) -> list:
     executor = TesTaskExecutor(image="alpine", command=["true"], workdir=Path("/work"))
     cmd = run_command(executor=executor, job_id="job", resource_conf=resource_conf, volume_confs=[], input_confs=[],
-                      output_confs=[], inputs_directory="", container_type=container_type)
+                      output_confs=[], inputs_directory="", container_type=container_type,
+                      writable_tmpfs=True)
     return shlex.split(cmd)
 
 
