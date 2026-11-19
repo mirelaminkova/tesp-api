@@ -316,7 +316,8 @@ def run_command(
     container_type: str,
     job_directory: Optional[str] = None,
     executor_index: int = 0,
-    writable_tmpfs: bool = True
+    *,
+    writable_tmpfs: bool  # no default: the caller must pass container.writable_tmpfs, or turning it off does nothing
 ) -> str:
     builder = ContainerCommandBuilder(container_type) \
         .with_job_id(job_id) \
@@ -347,7 +348,7 @@ def run_command(
     if container_type == "singularity":
         # Docker gives each executor a writable container layer; without this, Apptainer's container filesystem and
         # the directories it creates for input mounts are read-only (issue #68). Off (container.writable_tmpfs) where
-        # apptainer.conf has "enable overlay = no", which makes --writable-tmpfs fail.
+        # overlay is unavailable (e.g. "enable overlay = no" in apptainer.conf), which makes --writable-tmpfs fail.
         if writable_tmpfs:
             builder.with_writable_tmpfs()
         if not executor.workdir:

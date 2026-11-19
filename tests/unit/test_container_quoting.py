@@ -236,7 +236,8 @@ def test_run_command_passes_task_values_intact(container_type, value, tmp_path):
     input_confs = [{'container_path': f"/in/{value}", 'pulsar_path': "/staging/inputs/input_file_0",
                     'url': "http://example.org/in", 'type': TesTaskIOType.FILE}]
 
-    command = run_command(executor, "job", {}, volume_confs, input_confs, [], "/staging/inputs", container_type)
+    command = run_command(executor, "job", {}, volume_confs, input_confs, [], "/staging/inputs", container_type,
+                          writable_tmpfs=True)
 
     call = _runtime_call(_run_with_stubs(command, tmp_path))
     argv = call["argv"]

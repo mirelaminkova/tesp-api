@@ -22,9 +22,9 @@ def _input_confs(path="/staging/inputs/input_file_0"):
              'type': TesTaskIOType.FILE}]
 
 
-def _run_command(container_type, input_confs=None, volume_confs=(), **kwargs):
+def _run_command(container_type, input_confs=None, volume_confs=(), writable_tmpfs=True):
     return run_command(EXECUTOR, "job", {}, list(volume_confs), input_confs or _input_confs(), [], "/staging/inputs",
-                       container_type, **kwargs)
+                       container_type, writable_tmpfs=writable_tmpfs)
 
 
 def test_apptainer_executor_gets_a_writable_overlay():
@@ -89,12 +89,13 @@ def test_settings_toml_default_is_on():
 
 
 @pytest.mark.parametrize("value, expected", [(False, False), (True, True), ("false", False), (" FALSE ", False),
-                                             ("true", True), ("", True)])
+                                             ("true", True)])
 def test_writable_tmpfs_setting(value, expected):
     assert load_resource_config({'container': {'writable_tmpfs': value}}).writable_tmpfs is expected
 
 
-@pytest.mark.parametrize("value", ["no", "0", "off", 0, 1])
+# "" too: e.g. an empty TESP_API_CONTAINER__WRITABLE_TMPFS would otherwise silently override settings.toml.
+@pytest.mark.parametrize("value", ["", " ", "no", "0", "off", 0, 1])
 def test_invalid_writable_tmpfs_is_rejected(value):
     with pytest.raises(ValueError, match="container.writable_tmpfs"):
         load_resource_config({'container': {'writable_tmpfs': value}})

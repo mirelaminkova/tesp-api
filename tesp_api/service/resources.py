@@ -48,9 +48,9 @@ class ResourceConfig:
     resource. Placeholders: ``{cpu_cores}`` for the CPU template, ``{ram_gb}`` and ``{ram_mib}`` (ram_gb in whole MiB,
     rounded up) for the memory template.
 
-    ``writable_tmpfs`` (``container.writable_tmpfs``) runs singularity executors with ``--writable-tmpfs``. That needs
-    ``enable overlay = yes`` (Apptainer's default) in ``apptainer.conf`` on the nodes that run the jobs; set it to
-    false where overlay is disabled, or every singularity task fails.
+    ``writable_tmpfs`` (``container.writable_tmpfs``) runs singularity executors with ``--writable-tmpfs``. That needs a
+    usable overlay on the nodes that run the jobs (not ``enable overlay = no`` in ``apptainer.conf``, and overlayfs from
+    the kernel or fuse-overlayfs); set it to false where overlay is unavailable, or every singularity task fails.
     """
     container_limits: str = 'auto'
     native_spec_cpu_cores: str = ''
@@ -104,7 +104,7 @@ def load_resource_config(props=None) -> ResourceConfig:
         if value is None or isinstance(value, bool):
             return default if value is None else value
         text = str(value).strip().lower()  # e.g. a TESP_API_CONTAINER__WRITABLE_TMPFS that is not TOML
-        return {'': default, 'true': True, 'false': False}.get(text, value)
+        return {'true': True, 'false': False}.get(text, value)
 
     return ResourceConfig(
         container_limits=setting(container, 'resource_limits').lower() or 'auto',
