@@ -220,6 +220,22 @@ Canceling a task (`POST /v1/tasks/{id}:cancel`) is noticed at the next status re
 the Pulsar job, so it can take up to `max_poll_interval` seconds. Tasks with S3 outputs must also finish within
 `s3.output_presign_expiry_seconds`, see below.
 
+A task ends in `EXECUTOR_ERROR` when an executor exits with a non-zero code. When downloading the inputs (stage-in) or
+uploading the outputs (stage-out) fails, or Pulsar or the batch system does not start the job (for example, SLURM
+rejects a `ram_gb` no node has), the task ends in `SYSTEM_ERROR` instead, with the reason and the end of the stage's
+output in `logs[].system_logs` (`view=FULL`). Executors that did not run get no executor log. The outputs are uploaded
+also after a failed executor, and the task ends in `EXECUTOR_ERROR`. Outputs the failed executor did not write are
+skipped with a note, and if an upload fails, the other outputs are still tried and a note says so; with a Pulsar that
+lists the job's working directory these notes are in `logs[].system_logs`, else in the executor log's `stderr`.
+
+Each executor that ran gets its own entry in `logs[].logs`, in order, with its own `stdout` and `stderr` (the last
+64 KiB of each), `exit_code`, `start_time` and `end_time`. Output of the stage-in and stage-out containers is not part
+of them; their notes (e.g. an output that was not found) go to `logs[].system_logs`. An executor that the batch system
+or Pulsar stopped while it ran (for example, when the SLURM job reached its time limit) keeps its log with what it
+wrote until then, but without `exit_code` and `end_time`, and a note in `logs[].system_logs` says so; the task ends in
+`EXECUTOR_ERROR`. An executor killed for using too much memory usually gets exit code 137 instead, as the kernel kills
+only its processes. A task canceled through tesp-api gets no executor logs for the executors still running.
+
 &nbsp;
 ### S3 inputs and outputs
 Inputs and outputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
@@ -421,9 +437,9 @@ longer configured to redirect stdout into the file.
 | _TES_    | Only `cpu_cores` and `ram_gb` are used, as container runtime flags and/or a batch-system native specification (see [Task resources](#task-resources-cpu-and-memory)); with the default settings they are not enforced for `singularity`. Other resource fields (disk, preemptible, zones) are stored but not enforced. |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
 | _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
-| _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's stderr) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
+| _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's `logs[].system_logs`) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are uploaded also when an executor fails (what it left, e.g. Nextflow's `.exitcode` and `.command.err`); the task still ends in `EXECUTOR_ERROR`. |
 | _TES_    | Outputs are uploaded to `s3://` URLs and to HTTP(S) upload endpoints (multipart `POST`, form field `file`). Other URLs, such as the `ftp://` output in the example above, get the same `curl` multipart `POST`, which is not an FTP upload, so FTP outputs do not work. |
-| _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's stderr). |
+| _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's `logs[].system_logs`). |
 | _TES_    | Output paths must be absolute. Wildcards (`*`, `?`; TES 1.1 `path_prefix` outputs) are not supported and are refused with `400 Bad Request`. |
 | _TES_    | When an executor sets `stdin`, `stdout` or `stderr`, its image must provide `sh`. `logs.logs.stdout`/`stderr` then hold the last 64 KiB of each redirected stream, filtered to printable ASCII, so non-ASCII text is dropped from the log (the file keeps the exact bytes); without `tail`/`tr` in the image the log copy is empty. |
 
