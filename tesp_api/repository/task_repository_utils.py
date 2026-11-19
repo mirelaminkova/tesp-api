@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import List
 
+from loguru import logger
 from bson.objectid import ObjectId
 from fastapi.encoders import jsonable_encoder
 from pymonad.maybe import Just, Maybe, Nothing
@@ -8,26 +9,31 @@ from pymonad.maybe import Just, Maybe, Nothing
 from tesp_api.service.error import TaskNotFoundError
 from tesp_api.utils.functional import get_else_throw, maybe_of
 from tesp_api.repository.task_repository import task_repository
-from tesp_api.repository.model.task import RegisteredTesTask, TesTaskState, TesTaskLog, TesTaskExecutorLog
+from tesp_api.repository.model.task import RegisteredTesTask, TesTaskState, TesTaskLog, TesTaskExecutorLog, \
+    parse_output_file_logs
 
 
 async def append_task_executor_logs(
         task_id: ObjectId,
         author: str,
         state: TesTaskState,
-        command_start_time: datetime,
         command_end_time: datetime,
-        stdout: str,
-        stderr: str,
-        exit_code: int
+        executor_logs: List[TesTaskExecutorLog],
+        system_logs: List[str] = (),
+        output_file_logs: List[dict] = ()
     ):
     task: RegisteredTesTask = await task_repository.get_task(maybe_of(author), {'_id': task_id, 'state': state}) \
         .map(lambda _task: get_else_throw(_task, TaskNotFoundError(task_id, Just(state))))
     logs: List[TesTaskLog] = task.logs.copy()
     logs[-1].end_time = command_end_time
-    logs[-1].logs.append(TesTaskExecutorLog(
-        start_time=command_start_time, end_time=command_end_time,
-        stdout=stdout, stderr=stderr, exit_code=exit_code))
+    logs[-1].logs.extend(executor_logs)
+    if system_logs:
+        logs[-1].system_logs = [*(logs[-1].system_logs or []), *system_logs]
+    if output_file_logs:
+        valid, invalid = parse_output_file_logs(output_file_logs)
+        for output_file_log in invalid:
+            logger.warning(f"Task {task_id}: output file log of {output_file_log.get('path')!r} is not valid, skipped")
+        logs[-1].outputs = [*(logs[-1].outputs or []), *valid]
     await task_repository.update_task(
         {'_id': task_id, 'state': state},
         {'$set': {'logs': jsonable_encoder(logs)}}

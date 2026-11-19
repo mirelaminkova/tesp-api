@@ -220,6 +220,27 @@ Canceling a task (`POST /v1/tasks/{id}:cancel`) is noticed at the next status re
 the Pulsar job, so it can take up to `max_poll_interval` seconds. Tasks with S3 outputs must also finish within
 `s3.output_presign_expiry_seconds`, see below.
 
+A task ends in `EXECUTOR_ERROR` when an executor exits with a non-zero code. When downloading the inputs (stage-in) or
+uploading the outputs (stage-out) fails, or Pulsar or the batch system does not start the job (for example, SLURM
+rejects a `ram_gb` no node has), the task ends in `SYSTEM_ERROR` instead, with the reason and the end of the stage's
+output in `logs[].system_logs` (`view=FULL`). Executors that did not run get no executor log.
+
+Each executor that ran gets its own entry in `logs[].logs`, in order, with its own `stdout` and `stderr` (the last
+64 KiB of each), `exit_code`, `start_time` and `end_time`. Output of the stage-in and stage-out containers is not part
+of them; their notes (e.g. an output that was not found) go to `logs[].system_logs`.
+
+`logs[].outputs` lists each file the stage-out uploaded, also those of a stage-out that failed part way: its `path`
+in the container, its `size_bytes`, and its `url`, which is the task's own URL (never a presigned one). Files of
+`DIRECTORY` outputs and of wildcard outputs are listed one by one. For S3, a directory's file gets the output's URL
+joined with its relative path (percent-encoded), which is its key; HTTP(S) upload endpoints receive every file at the
+output's URL, so that is the URL listed. Missing outputs, and files whose name contains a newline (uploaded all the
+same), are not listed. The list comes from a report the stage-out writes to the job's working directory after the
+executors; under Apptainer an executor that leaves a process running in the background could still write to it. An executor that the batch system
+or Pulsar stopped while it ran (for example, when the SLURM job reached its time limit) keeps its log with what it
+wrote until then, but without `exit_code` and `end_time`, and a note in `logs[].system_logs` says so; the task ends in
+`EXECUTOR_ERROR`. An executor killed for using too much memory usually gets exit code 137 instead, as the kernel kills
+only its processes. A task canceled through tesp-api gets no executor logs for the executors still running.
+
 &nbsp;
 ### S3 inputs and outputs
 Inputs and outputs can be given as plain `s3://bucket/key` URLs, which is what most TES clients send (for example Nextflow's
@@ -420,11 +441,10 @@ longer configured to redirect stdout into the file.
 | _TES_    | Waiting for Pulsar jobs happens in the `TESP API` process and is not resumed when it starts again. Tasks that are queued, initializing or running when it stops or restarts never get their logs or final state: currently, after a clean shutdown they show `CANCELED` (the shutdown handler fails before it cancels their Pulsar jobs), after a crash they keep their state, and in both cases their Pulsar jobs go on. |
 | _TES_    | Only `cpu_cores` and `ram_gb` are used, as container runtime flags and/or a batch-system native specification (see [Task resources](#task-resources-cpu-and-memory)); with the default settings they are not enforced for `singularity`. Other resource fields (disk, preemptible, zones) are stored but not enforced. |
 | _TES_    | Task `tags` are accepted and stored but not used by the scheduler or runtime.                                                                                                      |
-| _TES_    | Task `logs.outputs` is not populated. Use `outputs` to persist result files.                                                                                                       |
-| _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's stderr) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
+| _TES_    | Outputs whose path does not exist after the executors finish are skipped (noted in the task's `logs[].system_logs`) and the task can still be `COMPLETE`. TES has no `optional` flag for outputs; clients such as Nextflow check for missing outputs themselves. Outputs are not uploaded when an executor fails. |
 | _TES_    | Outputs are uploaded to `s3://` URLs and to HTTP(S) upload endpoints (multipart `POST`, form field `file`). Other URLs, such as the `ftp://` output in the example above, get the same `curl` multipart `POST`, which is not an FTP upload, so FTP outputs do not work. |
-| _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's stderr). |
-| _TES_    | Output paths must be absolute. Wildcards (`*`, `?`; TES 1.1 `path_prefix` outputs) are not supported and are refused with `400 Bad Request`. |
+| _TES_    | `DIRECTORY` outputs upload every regular file below the directory, keeping relative paths: below the URL for S3, and as the multipart file name (e.g. `sub/a.txt`) for HTTP(S) upload endpoints, which receive one `POST` per file (form field `file`). Symbolic links inside the directory are not uploaded (each is noted in the task's `logs[].system_logs`). |
+| _TES_    | Output paths must be absolute. TES 1.1 wildcard outputs (`*`, `?` in the path, with `path_prefix`) are supported for `FILE` outputs to HTTP(S) upload endpoints, with the wildcards in the last path component and a `path_prefix` that the path's directory starts with. Each matching regular file is sent with the path minus `path_prefix` as its multipart file name. As in the shell, `*` does not match a leading `.`; `[` is not a wildcard. Wildcard outputs to `s3://` URLs, and the other cases, are refused with `400 Bad Request`. |
 | _TES_    | When an executor sets `stdin`, `stdout` or `stderr`, its image must provide `sh`. `logs.logs.stdout`/`stderr` then hold the last 64 KiB of each redirected stream, filtered to printable ASCII, so non-ASCII text is dropped from the log (the file keeps the exact bytes); without `tail`/`tr` in the image the log copy is empty. |
 
 &nbsp;

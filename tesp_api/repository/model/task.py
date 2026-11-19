@@ -2,15 +2,15 @@ import os
 import re
 from datetime import datetime
 from enum import Enum
-from typing import List, Dict, Union
+from typing import List, Dict, Optional, Tuple, Union
 from pathlib import Path
 from bson.objectid import ObjectId
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from pydantic.class_validators import root_validator
 
 from tesp_api.utils.types import AnyUrl, FtpUrl, S3Url, HttpUrl, HttpsUrl, LocalFileUrl
 from tesp_api.repository.model.py_object_id import PyObjectId
-from pydantic import BaseModel, Field, root_validator
+from pydantic import BaseModel, Field, root_validator, validator
 from typing import Union
 
 
@@ -77,7 +77,10 @@ class TesTaskOutput(BaseModel):
                                          ' - gs://my-bucket/file2'
                                          ' - file:///path/to/my/file')
 
-    path: str = Field(..., description="Path of the file inside the container. Must be an absolute path.")
+    path: str = Field(..., description="Path of the file inside the container. Must be an absolute path. May contain"
+                                       " the POSIX wildcards * and ? in its last component (TES 1.1).")
+    path_prefix: str = Field(None, description="Prefix removed from each file matching a path with wildcards; the"
+                                               " rest is appended to url. Required for such paths, ignored otherwise.")
     type: TesTaskIOType
 
 
@@ -134,6 +137,16 @@ class TesTaskExecutor(BaseModel):
         "HMMERDB": "/data/hmmer"
     }, description='Enviromental variables to set within the container. Example: { "env" : { "ENV_CONFIG_PATH" :'
                    ' "/data/config.file", "BLASTDB" : "/data/GRC38", "HMMERDB" : "/data/hmmer" } }')
+    ignore_error: bool = Field(False, example=False,
+                               description='Default behavior of running an array of executors is that execution'
+                                           ' stops on the first error. If `ignore_error` is `True`, then the'
+                                           ' runner will record error exit codes, but will continue on to the next'
+                                           ' tesExecutor.')
+
+    @validator('ignore_error', pre=True)
+    def _null_ignore_error_is_false(cls, value):
+        # TES: false unless set; a client sending null means the same.
+        return False if value is None else value
 
 
 class TesTaskExecutorLog(BaseModel):
@@ -161,6 +174,20 @@ class TesTaskOutputFileLog(BaseModel):
     size_bytes: str = Field(..., example='1024',
                             description="Size of the file in bytes. Note, this is currently coded as a string because"
                                         " official JSON doesn't support int64 numbers.")
+
+
+def parse_output_file_logs(output_file_logs: List[dict]) -> Tuple[List[TesTaskOutputFileLog], List[dict]]:
+    """
+    The ``TesTaskOutputFileLog`` models of ``output_file_logs``, and the entries the model rejects: a stored log that
+    does not validate would make the task unreadable, so those are left out.
+    """
+    valid, invalid = [], []
+    for output_file_log in output_file_logs:
+        try:
+            valid.append(TesTaskOutputFileLog(**output_file_log))
+        except ValidationError:
+            invalid.append(output_file_log)
+    return valid, invalid
 
 
 class TesTaskLog(BaseModel):
@@ -261,18 +288,48 @@ def find_unsupported_s3_urls(task: TesTask) -> List[str]:
     ]
 
 
+OUTPUT_WILDCARDS = "*?"
+
+
+def has_wildcards(path: str) -> bool:
+    """``*`` and ``?`` are wildcards in output paths; ``[`` is not, as it is common in file names."""
+    return any(c in path for c in OUTPUT_WILDCARDS)
+
+
 def find_unsupported_outputs(task: TesTask) -> List[str]:
     """
-    Returns the fields of outputs that cannot be uploaded: paths that are not absolute or contain the wildcards ``*``
-    or ``?`` (TES 1.1 ``path_prefix`` outputs, not supported yet). Without this check such an output would be skipped
-    as missing. ``[`` is allowed, as it is common in file names; ``path_prefix`` is ignored, as TES 1.1 says for paths
-    without wildcards.
+    Returns the fields of outputs that cannot be uploaded: paths that are not absolute, and TES 1.1 wildcard outputs
+    that tesp-api does not support (see ``unsupported_wildcard_output_field``). Without this check such an output
+    would be skipped as missing. ``path_prefix`` is ignored for paths without wildcards, as TES 1.1 says.
     """
-    return [
-        f"outputs[{i}].path"
-        for i, output in enumerate(task.outputs or [])
-        if not output.path.startswith("/") or any(c in output.path for c in "*?")
-    ]
+    unsupported = []
+    for i, output in enumerate(task.outputs or []):
+        if not output.path.startswith("/"):
+            unsupported.append(f"outputs[{i}].path")
+        elif has_wildcards(output.path):
+            field = unsupported_wildcard_output_field(output)
+            if field:
+                unsupported.append(f"outputs[{i}].{field}")
+    return unsupported
+
+
+def unsupported_wildcard_output_field(output: TesTaskOutput) -> Optional[str]:
+    """
+    For an output whose path has wildcards, the field that keeps it from being uploaded, if any: wildcards are
+    supported in the last path component only, for FILE outputs, with a ``path_prefix`` that the path's directory
+    starts with (so each match keeps a file name after the prefix is removed). S3 URLs are not supported yet, as
+    they need a presigned POST policy for the URL prefix.
+    """
+    if has_wildcards(os.path.dirname(output.path)):
+        return "path"
+    if output.type == TesTaskIOType.DIRECTORY:
+        return "type"
+    prefix = output.path_prefix
+    if not prefix or has_wildcards(prefix) or not (os.path.dirname(output.path).rstrip("/") + "/").startswith(prefix):
+        return "path_prefix"
+    if isinstance(output.url, S3Url):
+        return "url"
+    return None
 
 
 ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
