@@ -45,7 +45,7 @@ query_descriptions = {
 }
 
 qry_var_name_prefix = Query(None, description=query_descriptions['name_prefix'])
-qry_var_page_size = Query(256, description=query_descriptions['page_size'])
+qry_var_page_size = Query(256, gt=0, le=2048, description=query_descriptions['page_size'])
 qry_var_page_token = Query(None, description=query_descriptions['page_token'])
 qry_var_view = Query(TesTaskView.MINIMAL, description=query_descriptions['view'])
 

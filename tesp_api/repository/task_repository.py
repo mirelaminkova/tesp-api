@@ -83,13 +83,17 @@ class TaskRepository:
         full_search_query.update(page_token.maybe({}, lambda _page_token: {'_id': {'$gt': _page_token}}))
         full_search_query.update(search_query.maybe({}, lambda x: x))
 
-        return Promise(lambda resolve, reject: resolve((page_size, full_search_query))) \
-            .then(lambda size_and_query: size_and_query[0].maybe(
-                    self._tasks.find(size_and_query[1]),
-                    lambda x: self._tasks.find(size_and_query[1]).limit(x)
+        # Keyset paging: ordered by '_id', the next page starts after the last
+        # one; no token once a page comes back short (no more tasks).
+        size = page_size.maybe(None, lambda x: x)
+        return Promise(lambda resolve, reject: resolve(full_search_query)) \
+            .then(lambda query: (lambda cursor: cursor.limit(size) if size else cursor)(
+                    self._tasks.find(query).sort('_id', 1)
                  ).to_list(None)
             ).map(lambda found_tasks: list(map(lambda task: RegisteredTesTask(**task), found_tasks))) \
-            .map(lambda found_tasks: (found_tasks, found_tasks[-1].id if found_tasks else None))\
+            .map(lambda found_tasks: (
+                found_tasks,
+                found_tasks[-1].id if found_tasks and size and len(found_tasks) == size else None))\
             .catch(handle_data_layer_error)
 
     def cancel_task(
