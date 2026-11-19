@@ -521,3 +521,24 @@ def test_run_task_marks_the_job_submitted(monkeypatch, tmp_path):
     status = {'complete': 'true', 'status': 'complete', 'returncode': 0, 'job_stdout': '', 'job_stderr': ''}
     task, _ = run_task(monkeypatch, status, [TesTaskExecutor(image='ubuntu', command=['true'])])
     assert task.marks.get('tesp_pulsar_job_submitted') is True
+
+
+def test_database_error_on_the_last_lease_renewal_still_finishes_the_task(repo, recovery, monkeypatch):
+    event_actions = _import_event_actions()
+    task = repo.add(TesTaskState.RUNNING, tesp_pulsar_job_submitted=True, tesp_lease=_lease(recovery.INSTANCE_ID, 60))
+    operations = FakeOperations(job_status={'complete': 'true', 'returncode': 0})
+
+    async def failing_hold(task_id):
+        raise RuntimeError('mongo hiccup')
+
+    monkeypatch.setattr(event_actions.task_recovery, 'hold', failing_hold)
+    asyncio.run(event_actions.handle_resume_task(
+        ('resume_task', {'task_id': task['_id'], 'author': None, 'pulsar_operations': operations})))
+    assert task['state'] == TesTaskState.COMPLETE
+
+
+def test_lease_renewed_twice_in_the_same_instant_is_still_held(repo, recovery, monkeypatch):
+    task = repo.add(TesTaskState.RUNNING, tesp_lease=_lease(recovery.INSTANCE_ID, 60))
+    monkeypatch.setattr(recovery, '_now', lambda: NOW)
+    asyncio.run(recovery.hold(task['_id']))
+    asyncio.run(recovery.hold(task['_id']))  # no change to the document, still this process's lease

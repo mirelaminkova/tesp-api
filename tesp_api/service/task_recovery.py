@@ -10,14 +10,14 @@ only one process takes over a given task:
 * ``RUNNING``, or ``INITIALIZING`` with its Pulsar job submitted (``tesp_pulsar_job_submitted``): waiting for the
   job is resumed, and the task ends as usual, with its executor logs. An INITIALIZING task's job waits in the batch
   system's queue (issue #65); the task becomes RUNNING once the job runs. The Pulsar job id is the task id.
-* ``QUEUED``, or ``INITIALIZING`` without a submitted job: the task was never run.
-
-A process that stalls past its lease (a blocked event loop, a database outage) loses the task to another process; it
-notices at its next status request (``hold``) and stops waiting, so the task is finished once. It is set to
-  ``SYSTEM_ERROR`` with a system log, and whatever Pulsar holds for it is erased. It is not resubmitted, as its inputs
-  may have been staged in part.
+* ``QUEUED``, or ``INITIALIZING`` without a submitted job: the task was never run. It is set to ``SYSTEM_ERROR``
+  with a system log, and whatever Pulsar holds for it is erased. It is not resubmitted, as its inputs may have been
+  staged in part.
 * ``CANCELED`` with a lease left: the client canceled it while no process was there to end its Pulsar job, which is
   done now.
+
+A process that stalls past its lease (a blocked event loop, a database outage) loses the task to another process; it
+notices at its next status request (``hold``) and stops waiting, so the task is finished once.
 """
 import asyncio
 import datetime
@@ -111,10 +111,11 @@ async def hold(task_id: ObjectId) -> None:
     finished. Raises ``LeaseLostError`` when another process has claimed it meanwhile, so the task is never waited for
     and finished by two processes.
     """
-    held = await task_repository.update_tasks(
+    # The matched document, not the modified count: two renewals within the clock's resolution change nothing.
+    held = await task_repository.update_raw_task(
         {'_id': task_id, **own_leases_query()},
         {'$set': {f'{LEASE_FIELD}.expires': _now() + datetime.timedelta(seconds=LEASE_SECONDS)}})
-    if not held:
+    if held.is_nothing():
         raise LeaseLostError(task_id)
 
 

@@ -358,7 +358,13 @@ async def _wait_and_finish(task_id: ObjectId, author: Optional[str], pulsar_oper
         return task_monad.is_just() and task_monad.value.state == TesTaskState.CANCELED
 
     command_status = await pulsar_operations.job_status_complete(str(task_id), is_canceled, on_started=on_started)
-    await task_recovery.hold(task_id)
+    try:
+        await task_recovery.hold(task_id)
+    except task_recovery.LeaseLostError:
+        raise
+    except Exception as error:
+        # As in polling: a database hiccup is no reason to drop a finished job; _finish tries the database again.
+        logger.warning(f"Could not renew the lease of task {task_id} [{type(error).__name__}: {error}]")
     await _finish(task_id, author, pulsar_operations, event_name, executor_count,
                   started['at'] or datetime.datetime.now(datetime.timezone.utc), command_status)
 

@@ -48,6 +48,10 @@ class FakeRepository:
     async def get_task(self, author, query):
         return Just(self.task)
 
+    def update_raw_task(self, query, update):
+        self.update_tasks(query, update)
+        return _resolved(Just({'_id': query.get('_id')}))
+
     def update_tasks(self, query, update):
         # The lease and submission marks of tesp_api.service.task_recovery
         self.task.marks = {**getattr(self.task, 'marks', {}), **update.get('$set', {})}

@@ -146,6 +146,12 @@ class FakeTaskRepository:
             doc.update(update_query['$set'])
         return _resolved(maybe_of(doc).map(lambda found: RegisteredTesTask(**found)))
 
+    def update_raw_task(self, search_query, update_query):
+        doc = self._find({'_id': search_query['_id']})
+        if doc is not None:
+            doc.update(update_query.get('$set', {}))
+        return _resolved(maybe_of(doc))
+
     def update_tasks(self, search_query, update_query):
         # The lease and submission marks of tesp_api.service.task_recovery (only by _id here)
         doc = self._find({'_id': search_query['_id']})
