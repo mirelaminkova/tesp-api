@@ -122,7 +122,8 @@ async def get_tasks(
         .map(lambda tasks_and_token: response_from_model(
             TesGetAllTasksResponseModel(
                 next_page_token=str(tasks_and_token[1]) if tasks_and_token[1] else None,
-                tasks=list(map(lambda task: task.dict(**get_view(query_params['view'])), tasks_and_token[0])))
+                tasks=list(map(lambda task: task.dict(**get_view(query_params['view'])), tasks_and_token[0]))),
+            {'exclude_none': True}  # TES: next_page_token is a string; the last page leaves it out
         )).catch(api_handle_error)
 
 

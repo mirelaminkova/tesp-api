@@ -1,5 +1,6 @@
-"""ListTasks paging (issue #91): pages follow `_id` order, every task appears exactly once, the last page has no
-`next_page_token` (never the string "None"), and an invalid token is a 400.
+"""Endpoint: GET /v1/tasks paging, end to end through the router (issue #91). Pages follow `_id` order, every task
+appears exactly once, the last page leaves `next_page_token` out (never null or the string "None"), and an invalid
+token is a 400.
 
 MongoDB returns unsorted results in natural (storage) order, which need not follow `_id`. The fake collection below
 keeps its own natural order, different from `_id` order, so paging that forgets to sort skips or repeats tasks.
@@ -83,6 +84,7 @@ def walk(client, between_pages=lambda page_no: None, max_pages=50, **params):
         token = body.get('next_page_token')
         tokens.append(token)
         if not token:
+            assert 'next_page_token' not in body, body
             return pages, tokens
         between_pages(page_no)
     pytest.fail(f"no last page after {max_pages} pages")
@@ -93,17 +95,9 @@ def test_last_page_has_no_token(client, tasks, count):
     for i in range(count):
         tasks.insert(f"t{i}")
     pages, tokens = walk(client)
-    assert tokens[-1] in (None, ''), tokens
+    assert tokens[-1] is None, tokens
     assert 'None' not in tokens
     assert sum(map(len, pages)) == count
-
-
-def test_short_page_has_no_token(client, tasks):
-    for i in range(PAGE_SIZE - 1):
-        tasks.insert(f"t{i}")
-    body = list_page(client)
-    assert len(body['tasks']) == PAGE_SIZE - 1
-    assert not body.get('next_page_token')
 
 
 def test_walk_visits_every_task_once_in_id_order(client, tasks):
@@ -111,7 +105,7 @@ def test_walk_visits_every_task_once_in_id_order(client, tasks):
     pages, _ = walk(client)
     seen = [task_id for page in pages for task_id in page]
     assert seen == sorted(created, key=ObjectId)
-    assert all(0 < len(page) <= PAGE_SIZE for page in pages[:-1])
+    assert all(len(page) == PAGE_SIZE for page in pages[:-1])
 
 
 def test_walk_with_interleaved_inserts_visits_every_task_once(client, tasks):
@@ -132,6 +126,27 @@ def test_walk_with_name_prefix_keeps_order(client, tasks):
     pages, _ = walk(client, name_prefix='keep')
     seen = [task_id for page in pages for task_id in page]
     assert seen == sorted(created[1::2], key=ObjectId)
+
+
+def test_last_page_leaves_token_out(client, tasks):
+    # TES types next_page_token as a string, so the last page leaves it out rather than sending null.
+    tasks.insert('t0')
+    assert 'next_page_token' not in list_page(client)
+    assert list_page(client, page_size=1)['next_page_token']
+
+
+@pytest.mark.parametrize('page_size', [0, -2, 2049, 10 ** 30])
+def test_page_size_out_of_range_is_rejected(client, tasks, page_size):
+    # A negative MongoDB limit means "one batch, then close": the walk would end early without a token.
+    tasks.insert('t0')
+    response = client.get('/v1/tasks', params={'page_size': page_size})
+    assert response.status_code == 422, response.text
+
+
+@pytest.mark.parametrize('page_size', [1, 2048])  # 2048: what clients (and #74's smoke test) already send
+def test_page_size_in_range_is_accepted(client, tasks, page_size):
+    tasks.insert('t0')
+    assert len(list_page(client, page_size=page_size)['tasks']) == 1
 
 
 @pytest.mark.parametrize('token', ['None', 'not-an-object-id', '123'])

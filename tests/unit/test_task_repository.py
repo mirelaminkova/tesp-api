@@ -1,4 +1,4 @@
-"""Unit tests for task list paging (no services needed)."""
+"""Repository: TaskRepository.get_tasks paging against a fake collection (issue #91; no services needed)."""
 
 import asyncio
 
